@@ -1,0 +1,45 @@
+# Unity generated folders
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild*/
+[Ll]ogs/
+[Uu]ser[Ss]ettings/
+.utmp
+
+# Cache and local Unity data
+[Mm]emoryCaptures/
+[Rr]ecordings/
+*.pidb
+*.suo
+*.user
+*.userprefs
+*.csproj
+*.unityproj
+*.sln
+*.slnx
+*.tmp
+*.booproj
+*.svd
+
+# Visual Studio / Rider / VS Code
+.vs/
+.vscode/
+.idea/
+*.csproj.user
+*.DotSettings.user
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Logs and crash reports
+*.log
+*.stacktrace
+crashlytics-build.properties
+
+# Unity asset metadata that should remain tracked
+!Assets/**/*.meta
+!Packages/**/*.meta
+!ProjectSettings/**/*.meta
