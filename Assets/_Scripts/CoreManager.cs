@@ -16,6 +16,8 @@ public class CoreManager : MonoBehaviour
     [SerializeField, Min(8)] private int trajectorySegmentCount = 24;
     [SerializeField, Min(0.01f)] private float trajectoryTimeStep = 0.08f;
     [SerializeField] private bool showTrajectoryDebug = true;
+    [SerializeField, Range(0.1f, 1f)] private float aimDragSensitivity = 0.6f;
+    [SerializeField, Range(0.01f, 1f)] private float aimDirectionResponse = 0.08f;
 
     [SerializeField] private TMP_Text stackedBlocksText;
 
@@ -29,6 +31,8 @@ public class CoreManager : MonoBehaviour
     [Header("Stacking Settings")]
     [SerializeField] private float maxLaunchImpulse = 12f;
     [SerializeField, Min(0f)] private float balancedHoldTime = 0.5f;
+    [SerializeField] private bool enableBlockBaseMovement = true;
+    [SerializeField, Min(1)] private int blockBaseMovementStartStackCount = 2;
     [SerializeField, Min(0f)] private float blockBaseMoveDuration = 0.35f;
     [SerializeField] private float blockBaseQuarterTurnDegrees = 90f;
     [SerializeField, Min(0f)] private float spawnDelayAfterBlockBaseMove = 0.5f;
@@ -39,6 +43,8 @@ public class CoreManager : MonoBehaviour
     private bool trajectoryVisible;
     private bool isAiming;
     private float currentLineLength;
+    private float currentAimAngle;
+    private bool hasAimAngle;
     private Rigidbody blockToLaunch;
     private TotemBlockDetector currentBlockDetector;
     private float balancedTimer;
@@ -117,6 +123,7 @@ public class CoreManager : MonoBehaviour
             {
                 isAiming = true;
                 hasUsedAimForCurrentBlock = true;
+                hasAimAngle = false;
 
                 if (lineGraphicImage != null)
                 {
@@ -146,11 +153,23 @@ public class CoreManager : MonoBehaviour
 
         Vector2 center = circle.rect.center;
         Vector2 dir = mouseLocal - center;
+        float targetAngle = Mathf.Atan2(-dir.y, -dir.x) * Mathf.Rad2Deg;
 
-        float angle = Mathf.Atan2(-dir.y, -dir.x) * Mathf.Rad2Deg;
+        if (!hasAimAngle)
+        {
+            currentAimAngle = targetAngle;
+            hasAimAngle = true;
+        }
+        else
+        {
+            currentAimAngle = Mathf.LerpAngle(
+                currentAimAngle,
+                targetAngle,
+                aimDirectionResponse);
+        }
 
         line.anchoredPosition = Vector2.zero;
-        line.localRotation = Quaternion.Euler(0f, 0f, angle);
+        line.localRotation = Quaternion.Euler(0f, 0f, currentAimAngle);
 
         if (lineGraphic != null)
         {
@@ -160,7 +179,7 @@ public class CoreManager : MonoBehaviour
 
             if (IsMouseInsideOuterArea(mouseScreen, uiCamera))
             {
-                currentLineLength = dir.magnitude * 2f;
+                currentLineLength = dir.magnitude * 2f * aimDragSensitivity;
             }
 
             lineGraphic.sizeDelta = new Vector2(currentLineLength, lineGraphicHeight);
@@ -188,6 +207,7 @@ public class CoreManager : MonoBehaviour
         blockToLaunch.AddForce(launchDirection * launchImpulse, ForceMode.Impulse);
         hasLaunchedCurrentBlock = true;
         HideTrajectoryDebug();
+        hasAimAngle = false;
     }
 
     private bool TryGetLaunchParameters(out Vector3 launchDirection, out float launchImpulse)
@@ -212,9 +232,9 @@ public class CoreManager : MonoBehaviour
             return false;
         }
 
-        Vector2 center = circle.rect.center;
-        Vector2 dir = mouseLocal - center;
-        Vector2 launchDirection2D = -dir.normalized;
+        Vector2 launchDirection2D = new Vector2(
+            Mathf.Cos(currentAimAngle * Mathf.Deg2Rad),
+            Mathf.Sin(currentAimAngle * Mathf.Deg2Rad));
 
         if (launchDirection2D == Vector2.zero)
         {
@@ -322,6 +342,7 @@ public class CoreManager : MonoBehaviour
         hasSpawnedNextBlock = false;
         hasUsedAimForCurrentBlock = false;
         hasLaunchedCurrentBlock = false;
+        hasAimAngle = false;
         unstackedBlockQuietTimer = 0f;
         isAiming = false;
         currentLineLength = 0f;
@@ -441,7 +462,14 @@ public class CoreManager : MonoBehaviour
             return;
         }
 
+        CleanupInvalidStackedBlocks();
+
         if (pendingDestroyBlocks.Count > 0)
+        {
+            return;
+        }
+
+        if (!AreStackedBlocksFullySettled())
         {
             return;
         }
@@ -490,20 +518,31 @@ public class CoreManager : MonoBehaviour
 
             if (detector.IsBalanced)
             {
+                pendingDestroyBlocks.Remove(detector);
                 continue;
             }
 
             if (IsBlockCompletelyStill(detector))
             {
+                if (detector == currentBlockDetector ||
+                    (blockToLaunch != null &&
+                     detector.TryGetComponent<Rigidbody>(out Rigidbody detectorRigidbody) &&
+                     blockToLaunch == detectorRigidbody))
+                {
+                    ResetCurrentBlockRemovalState();
+                }
+
+                pendingDestroyBlocks.Remove(detector);
+                stackedBlocks.RemoveAt(i);
                 Destroy(detector.gameObject);
+                listChanged = true;
+                continue;
             }
-            else if (!pendingDestroyBlocks.Contains(detector))
+
+            if (!pendingDestroyBlocks.Contains(detector))
             {
                 pendingDestroyBlocks.Add(detector);
             }
-
-            stackedBlocks.RemoveAt(i);
-            listChanged = true;
         }
 
         if (!listChanged)
@@ -513,6 +552,31 @@ public class CoreManager : MonoBehaviour
 
         RefreshStackedBlocksText();
         RefreshBlockBasePosition(false);
+    }
+
+    private bool AreStackedBlocksFullySettled()
+    {
+        for (int i = 0; i < stackedBlocks.Count; i++)
+        {
+            TotemBlockDetector detector = stackedBlocks[i];
+
+            if (detector == null)
+            {
+                return false;
+            }
+
+            if (!detector.IsBalanced)
+            {
+                return false;
+            }
+
+            if (!IsBlockCompletelyStill(detector))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private bool ProcessOnePendingDestroyBlock()
@@ -535,6 +599,12 @@ public class CoreManager : MonoBehaviour
             {
                 pendingDestroyBlocks.RemoveAt(i);
                 return true;
+            }
+
+            if (detector.IsBalanced)
+            {
+                pendingDestroyBlocks.RemoveAt(i);
+                return false;
             }
 
             if (!IsBlockCompletelyStill(detector))
@@ -583,6 +653,7 @@ public class CoreManager : MonoBehaviour
         spawnBlockAfterBaseAnimation = false;
         hasUsedAimForCurrentBlock = false;
         hasLaunchedCurrentBlock = false;
+        hasAimAngle = false;
         unstackedBlockQuietTimer = 0f;
 
         if (lineGraphicImage != null)
@@ -660,13 +731,13 @@ public class CoreManager : MonoBehaviour
             return;
         }
 
-        int stackedCount = Mathf.Max(0, stackedBlocks.Count - 1);
-        float targetY = blockBaseInitialY + stackedCount;
+        int movementStepCount = GetBlockBaseMovementStepCount();
+        float targetY = blockBaseInitialY + movementStepCount;
         Vector3 position = blockBase.position;
         position.y = targetY;
         blockBase.position = position;
 
-        float targetRotation = blockBaseQuarterTurnDegrees * stackedCount;
+        float targetRotation = blockBaseQuarterTurnDegrees * movementStepCount;
         blockBase.rotation = blockBaseInitialRotation * Quaternion.Euler(0f, targetRotation, 0f);
     }
 
@@ -685,13 +756,13 @@ public class CoreManager : MonoBehaviour
         ProcessOnePendingDestroyBlock();
         CleanupInvalidStackedBlocks();
 
-        int stackedCount = Mathf.Max(0, stackedBlocks.Count - 1);
+        int movementStepCount = GetBlockBaseMovementStepCount();
         Vector3 targetPosition = blockBase.position;
-        targetPosition.y = blockBaseInitialY + stackedCount;
+        targetPosition.y = blockBaseInitialY + movementStepCount;
 
         Quaternion targetRotation =
             blockBaseInitialRotation *
-            Quaternion.Euler(0f, blockBaseQuarterTurnDegrees * stackedCount, 0f);
+            Quaternion.Euler(0f, blockBaseQuarterTurnDegrees * movementStepCount, 0f);
 
         bool hasMeaningfulBaseChange =
             Vector3.Distance(blockBase.position, targetPosition) > 0.001f ||
@@ -717,6 +788,22 @@ public class CoreManager : MonoBehaviour
         blockBaseAnimationTimer = 0f;
         isBlockBaseAnimating = true;
         spawnBlockAfterBaseAnimation = spawnAfterAnimation;
+    }
+
+    private int GetBlockBaseMovementStepCount()
+    {
+        if (blockBase == null || !enableBlockBaseMovement)
+        {
+            return 0;
+        }
+
+        int stackedCount = stackedBlocks.Count;
+        if (stackedCount < blockBaseMovementStartStackCount)
+        {
+            return 0;
+        }
+
+        return stackedCount - blockBaseMovementStartStackCount + 1;
     }
 
     private void UpdateBlockBaseAnimation()

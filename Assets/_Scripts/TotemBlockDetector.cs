@@ -13,6 +13,7 @@ public class TotemBlockDetector : MonoBehaviour
     public bool IsBalanced => isBalanced;
 
     private Rigidbody cachedRigidbody;
+    private bool hasSupportingContactThisStep;
 
     private void Awake()
     {
@@ -21,6 +22,9 @@ public class TotemBlockDetector : MonoBehaviour
 
     private void FixedUpdate()
     {
+        IsSupported = hasSupportingContactThisStep;
+        hasSupportingContactThisStep = false;
+        UpdateBalanceState();
     }
 
     private void OnCollisionStay(Collision collision)
@@ -36,7 +40,7 @@ public class TotemBlockDetector : MonoBehaviour
 
             if (contact.normal.y >= supportNormalThreshold)
             {
-                IsSupported = true;
+                hasSupportingContactThisStep = true;
                 UpdateBalanceState();
                 return;
             }
@@ -50,7 +54,6 @@ public class TotemBlockDetector : MonoBehaviour
             return;
         }
 
-        IsSupported = false;
         isBalanced = false;
     }
 
