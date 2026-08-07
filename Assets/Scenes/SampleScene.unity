@@ -388,7 +388,7 @@ Transform:
   m_GameObject: {fileID: 330585543}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0, y: 1, z: -13.43}
+  m_LocalPosition: {x: 0.5, y: 2, z: -18.5}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -1251,16 +1251,21 @@ MonoBehaviour:
   blockPrefab: {fileID: 7374580289148323530, guid: 4618d5188ff336247b10bc319fb54529, type: 3}
   blockSpawnPoint: {fileID: 446297543}
   baseTargetTransform: {fileID: 0}
+  totemBase: {fileID: 1743001064}
   blockBase: {fileID: 2013776004}
   stackedBlocks: []
-  maxLaunchImpulse: 15
+  maxLaunchImpulse: 26
   balancedHoldTime: 1
+  apexFallGravityMultiplier: 5
+  apexFallBlendTime: 0.35
   enableBlockBaseMovement: 0
   blockBaseMovementStartStackCount: 2
   blockBaseMoveDuration: 0.35
   blockBaseQuarterTurnDegrees: 90
   spawnDelayAfterBlockBaseMove: 0.5
   unstackedBlockAutoDestroyDelay: 0.35
+  snapshotYDropTolerance: 0.1
+  enableSnapshotDebugLogs: 1
 --- !u!4 &1483525529
 Transform:
   m_ObjectHideFlags: 0
@@ -1473,7 +1478,7 @@ Transform:
   m_GameObject: {fileID: 2013776000}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: -1.5, y: 0.2, z: 0}
+  m_LocalPosition: {x: -2.79, y: 0.2, z: 0}
   m_LocalScale: {x: 1.5, y: 0.2, z: 1.5}
   m_ConstrainProportionsScale: 0
   m_Children:

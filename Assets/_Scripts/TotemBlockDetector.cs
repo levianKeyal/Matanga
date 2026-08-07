@@ -1,4 +1,5 @@
 using UnityEngine;
+using System.Collections.Generic;
 
 [RequireComponent(typeof(Rigidbody))]
 public class TotemBlockDetector : MonoBehaviour
@@ -13,7 +14,7 @@ public class TotemBlockDetector : MonoBehaviour
     public bool IsBalanced => isBalanced;
 
     private Rigidbody cachedRigidbody;
-    private bool hasSupportingContactThisStep;
+    private readonly HashSet<Collider> supportColliders = new HashSet<Collider>();
 
     private void Awake()
     {
@@ -22,8 +23,6 @@ public class TotemBlockDetector : MonoBehaviour
 
     private void FixedUpdate()
     {
-        IsSupported = hasSupportingContactThisStep;
-        hasSupportingContactThisStep = false;
         UpdateBalanceState();
     }
 
@@ -34,17 +33,34 @@ public class TotemBlockDetector : MonoBehaviour
             return;
         }
 
+        bool isSupportingContact = false;
+        bool isNearlyStill = cachedRigidbody != null &&
+                             cachedRigidbody.linearVelocity.sqrMagnitude <= linearBalanceThreshold * linearBalanceThreshold * 4f &&
+                             cachedRigidbody.angularVelocity.sqrMagnitude <= angularBalanceThreshold * angularBalanceThreshold * 4f;
+
         for (int i = 0; i < collision.contactCount; i++)
         {
             ContactPoint contact = collision.GetContact(i);
 
-            if (contact.normal.y >= supportNormalThreshold)
+            if (contact.normal.y >= supportNormalThreshold ||
+                (isNearlyStill && contact.normal.y > 0.05f))
             {
-                hasSupportingContactThisStep = true;
-                UpdateBalanceState();
-                return;
+                isSupportingContact = true;
+                break;
             }
         }
+
+        if (isSupportingContact)
+        {
+            supportColliders.Add(collision.collider);
+        }
+        else
+        {
+            supportColliders.Remove(collision.collider);
+        }
+
+        IsSupported = supportColliders.Count > 0;
+        UpdateBalanceState();
     }
 
     private void OnCollisionExit(Collision collision)
@@ -54,6 +70,8 @@ public class TotemBlockDetector : MonoBehaviour
             return;
         }
 
+        supportColliders.Remove(collision.collider);
+        IsSupported = supportColliders.Count > 0;
         isBalanced = false;
     }
 
