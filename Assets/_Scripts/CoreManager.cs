@@ -1,10 +1,26 @@
 using UnityEngine;
 using UnityEngine.InputSystem;
+using UnityEngine.InputSystem.Controls;
 using System.Collections.Generic;
 using TMPro;
 
 public class CoreManager : MonoBehaviour
 {
+    private enum PointerSource
+    {
+        None,
+        Mouse,
+        Touch
+    }
+
+    private struct PointerFrameState
+    {
+        public PointerSource source;
+        public Vector2 screenPosition;
+        public bool pressedThisFrame;
+        public bool releasedThisFrame;
+    }
+
     [System.Serializable]
     private class BlockSnapshotEntry
     {
@@ -96,6 +112,7 @@ public class CoreManager : MonoBehaviour
     private Quaternion blockBaseAnimationStartRotation;
     private Vector3 blockBaseAnimationTargetPosition;
     private Quaternion blockBaseAnimationTargetRotation;
+    private PointerSource activePointerSource = PointerSource.None;
 
     private void Awake()
     {
@@ -128,15 +145,13 @@ public class CoreManager : MonoBehaviour
 
     private void Update()
     {
-        if (Mouse.current == null)
-        {
-            return;
-        }
+        bool hasPointerState = TryGetPointerFrameState(out PointerFrameState pointerState);
 
-        if (Mouse.current.leftButton.wasReleasedThisFrame)
+        if (hasPointerState && pointerState.releasedThisFrame)
         {
             LaunchBlock();
             isAiming = false;
+            activePointerSource = PointerSource.None;
             if (lineGraphicImage != null)
             {
                 lineGraphicImage.enabled = false;
@@ -148,13 +163,14 @@ public class CoreManager : MonoBehaviour
         UpdateBalancedBlockState();
         UpdateUnstackedLaunchedBlockState();
         UpdateTrajectoryDebug();
-        if (Mouse.current.leftButton.wasPressedThisFrame)
+        if (hasPointerState && pointerState.pressedThisFrame)
         {
-            if (!hasUsedAimForCurrentBlock && !hasLaunchedCurrentBlock && IsMouseInsideAimArea())
+            if (!hasUsedAimForCurrentBlock && !hasLaunchedCurrentBlock && IsPointerInsideAimArea(pointerState.screenPosition))
             {
                 isAiming = true;
                 hasUsedAimForCurrentBlock = true;
                 hasAimAngle = false;
+                activePointerSource = pointerState.source;
 
                 if (lineGraphicImage != null)
                 {
@@ -170,20 +186,25 @@ public class CoreManager : MonoBehaviour
             return;
         }
 
-        Vector2 mouseScreen = Mouse.current.position.ReadValue();
+        if (!hasPointerState)
+        {
+            return;
+        }
+
+        Vector2 pointerScreen = pointerState.screenPosition;
         Camera uiCamera = GetUiCamera();
 
         if (!RectTransformUtility.ScreenPointToLocalPointInRectangle(
                 circle,
-                mouseScreen,
+                pointerScreen,
                 uiCamera,
-                out Vector2 mouseLocal))
+                out Vector2 pointerLocal))
         {
             return;
         }
 
         Vector2 center = circle.rect.center;
-        Vector2 dir = mouseLocal - center;
+        Vector2 dir = pointerLocal - center;
         float targetAngle = Mathf.Atan2(-dir.y, -dir.x) * Mathf.Rad2Deg;
 
         if (!hasAimAngle)
@@ -208,7 +229,7 @@ public class CoreManager : MonoBehaviour
             lineGraphic.localRotation = Quaternion.identity;
             lineGraphicHeight = Mathf.Clamp(lineGraphicHeight, 2f, 10f);
 
-            if (IsMouseInsideOuterArea(mouseScreen, uiCamera))
+            if (IsPointerInsideOuterArea(pointerScreen, uiCamera))
             {
                 currentLineLength = dir.magnitude * 2f * aimDragSensitivity;
             }
@@ -259,14 +280,18 @@ public class CoreManager : MonoBehaviour
             return false;
         }
 
+        if (!TryGetPointerScreenPosition(out Vector2 pointerScreen))
+        {
+            return false;
+        }
+
         Camera uiCamera = GetUiCamera();
-        Vector2 mouseScreen = Mouse.current != null ? Mouse.current.position.ReadValue() : Vector2.zero;
 
         if (!RectTransformUtility.ScreenPointToLocalPointInRectangle(
                 circle,
-                mouseScreen,
+                pointerScreen,
                 uiCamera,
-                out Vector2 mouseLocal))
+                out Vector2 pointerLocal))
         {
             return false;
         }
@@ -1213,34 +1238,121 @@ public class CoreManager : MonoBehaviour
         blockToLaunch.transform.rotation = Quaternion.LookRotation(toBase.normalized, Vector3.up);
     }
 
-    private bool IsMouseInsideAimArea()
+    private bool IsPointerInsideAimArea(Vector2 pointerScreen)
     {
-        if (Mouse.current == null)
+        Camera uiCamera = GetUiCamera();
+
+        return IsPointerInsideCircle(pointerScreen, uiCamera) || IsPointerInsideOuterArea(pointerScreen, uiCamera);
+    }
+
+    private bool TryGetPointerScreenPosition(out Vector2 pointerScreen)
+    {
+        if (TryGetPointerFrameState(out PointerFrameState pointerState))
+        {
+            pointerScreen = pointerState.screenPosition;
+            return true;
+        }
+
+        pointerScreen = Vector2.zero;
+        return false;
+    }
+
+    private bool TryGetPointerFrameState(out PointerFrameState pointerState)
+    {
+        if (activePointerSource == PointerSource.Touch)
+        {
+            return TryGetTouchPointerState(out pointerState);
+        }
+
+        if (activePointerSource == PointerSource.Mouse)
+        {
+            return TryGetMousePointerState(out pointerState);
+        }
+
+        if (TryGetTouchPointerState(out pointerState))
+        {
+            return true;
+        }
+
+        if (TryGetMousePointerState(out pointerState))
+        {
+            return true;
+        }
+
+        pointerState = default;
+        return false;
+    }
+
+    private bool TryGetTouchPointerState(out PointerFrameState pointerState)
+    {
+        pointerState = default;
+
+        Touchscreen touchScreen = Touchscreen.current;
+        if (touchScreen == null)
         {
             return false;
         }
 
-        Vector2 mouseScreen = Mouse.current.position.ReadValue();
-        Camera uiCamera = GetUiCamera();
+        TouchControl touch = touchScreen.primaryTouch;
+        if (touch == null)
+        {
+            return false;
+        }
 
-        return IsMouseInsideCircle(mouseScreen, uiCamera) || IsMouseInsideOuterArea(mouseScreen, uiCamera);
+        bool isActive = touch.press.isPressed || touch.press.wasPressedThisFrame || touch.press.wasReleasedThisFrame;
+        if (!isActive)
+        {
+            return false;
+        }
+
+        pointerState.source = PointerSource.Touch;
+        pointerState.screenPosition = touch.position.ReadValue();
+        pointerState.pressedThisFrame = touch.press.wasPressedThisFrame;
+        pointerState.releasedThisFrame = touch.press.wasReleasedThisFrame;
+        return true;
     }
 
-    private bool IsMouseInsideCircle(Vector2 mouseScreen, Camera uiCamera)
+    private bool TryGetMousePointerState(out PointerFrameState pointerState)
+    {
+        pointerState = default;
+
+        Mouse mouse = Mouse.current;
+        if (mouse == null)
+        {
+            return false;
+        }
+
+        bool isActive = mouse.leftButton.isPressed ||
+                        mouse.leftButton.wasPressedThisFrame ||
+                        mouse.leftButton.wasReleasedThisFrame;
+
+        if (!isActive)
+        {
+            return false;
+        }
+
+        pointerState.source = PointerSource.Mouse;
+        pointerState.screenPosition = mouse.position.ReadValue();
+        pointerState.pressedThisFrame = mouse.leftButton.wasPressedThisFrame;
+        pointerState.releasedThisFrame = mouse.leftButton.wasReleasedThisFrame;
+        return true;
+    }
+
+    private bool IsPointerInsideCircle(Vector2 pointerScreen, Camera uiCamera)
     {
         if (!RectTransformUtility.ScreenPointToLocalPointInRectangle(
                 circle,
-                mouseScreen,
+                pointerScreen,
                 uiCamera,
-                out Vector2 mouseLocal))
+                out Vector2 pointerLocal))
         {
             return false;
         }
 
-        return circle.rect.Contains(mouseLocal);
+        return circle.rect.Contains(pointerLocal);
     }
 
-    private bool IsMouseInsideOuterArea(Vector2 mouseScreen, Camera uiCamera)
+    private bool IsPointerInsideOuterArea(Vector2 pointerScreen, Camera uiCamera)
     {
         if (outerAreaCircle == null)
         {
@@ -1249,14 +1361,14 @@ public class CoreManager : MonoBehaviour
 
         if (!RectTransformUtility.ScreenPointToLocalPointInRectangle(
                 outerAreaCircle,
-                mouseScreen,
+                pointerScreen,
                 uiCamera,
-                out Vector2 mouseLocal))
+                out Vector2 pointerLocal))
         {
             return false;
         }
 
-        return outerAreaCircle.rect.Contains(mouseLocal);
+        return outerAreaCircle.rect.Contains(pointerLocal);
     }
 
     private void EnsureLineGraphic()

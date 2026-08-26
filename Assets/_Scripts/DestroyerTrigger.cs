@@ -27,7 +27,7 @@ public class DestroyerTrigger : MonoBehaviour
 
         if (coreManager == null)
         {
-            coreManager = FindObjectOfType<CoreManager>();
+            coreManager = FindFirstObjectByType<CoreManager>();
         }
 
         if (coreManager != null)
