@@ -10,6 +10,13 @@ public class DestroyerTrigger : MonoBehaviour
     {
         Collider triggerCollider = GetComponent<Collider>();
         triggerCollider.isTrigger = true;
+
+        if (coreManager == null)
+        {
+            Debug.LogWarning(
+                $"{nameof(DestroyerTrigger)} on '{name}' has no CoreManager assigned. It will use scene lookup as a fallback.",
+                this);
+        }
     }
 
     private void OnTriggerEnter(Collider other)

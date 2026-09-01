@@ -1,44 +1,9 @@
 using UnityEngine;
-using UnityEngine.InputSystem;
-using UnityEngine.InputSystem.Controls;
 using System.Collections.Generic;
 using TMPro;
 
 public class CoreManager : MonoBehaviour
 {
-    private enum PointerSource
-    {
-        None,
-        Mouse,
-        Touch
-    }
-
-    private struct PointerFrameState
-    {
-        public PointerSource source;
-        public Vector2 screenPosition;
-        public bool pressedThisFrame;
-        public bool releasedThisFrame;
-    }
-
-    [System.Serializable]
-    private class BlockSnapshotEntry
-    {
-        public TotemBlockDetector block;
-        public int stackIndex;
-        public Vector3 localPosition;
-        public Quaternion localRotation;
-        public float localY;
-        public bool wasBalanced;
-    }
-
-    [System.Serializable]
-    private class TowerSnapshot
-    {
-        public List<BlockSnapshotEntry> blocks = new List<BlockSnapshotEntry>();
-        public float capturedAtTime;
-    }
-
     [Header("UI Elements")]
     [SerializeField] private RectTransform circle;
     [SerializeField] private RectTransform line;
@@ -50,8 +15,11 @@ public class CoreManager : MonoBehaviour
     [SerializeField, Min(8)] private int trajectorySegmentCount = 24;
     [SerializeField, Min(0.01f)] private float trajectoryTimeStep = 0.08f;
     [SerializeField] private bool showTrajectoryDebug = true;
+    [SerializeField] private TrajectoryPreview trajectoryPreview;
     [SerializeField, Range(0.1f, 1f)] private float aimDragSensitivity = 0.6f;
     [SerializeField, Range(0.01f, 1f)] private float aimDirectionResponse = 0.08f;
+    [SerializeField] private AimVisualController aimVisualController;
+    [SerializeField] private AimInputController aimInputController;
 
     [SerializeField] private TMP_Text stackedBlocksText;
 
@@ -61,6 +29,8 @@ public class CoreManager : MonoBehaviour
     [SerializeField] private Transform baseTargetTransform;
     [SerializeField] private Transform totemBase;
     [SerializeField] private Transform blockBase;
+    [SerializeField] private BlockBaseMover blockBaseMover;
+    [SerializeField] private TowerStackController towerStackController;
     [SerializeField] private List<TotemBlockDetector> stackedBlocks = new List<TotemBlockDetector>();
 
     [Header("Stacking Settings")]
@@ -76,10 +46,9 @@ public class CoreManager : MonoBehaviour
     [SerializeField, Min(0f)] private float unstackedBlockAutoDestroyDelay = 0.35f;
     [SerializeField, Min(0f)] private float snapshotYDropTolerance = 0.1f;
     [SerializeField] private bool enableSnapshotDebugLogs = true;
+    [SerializeField] private bool enableBlockBaseDebugLogs = false;
+    [SerializeField] private TowerSnapshotValidator towerSnapshotValidator;
 
-    private RectTransform lineGraphic;
-    private UnityEngine.UI.Image lineGraphicImage;
-    private bool trajectoryVisible;
     private bool isAiming;
     private float currentLineLength;
     private float currentAimAngle;
@@ -99,20 +68,8 @@ public class CoreManager : MonoBehaviour
     private float unstackedBlockQuietTimer;
     private float respawnTimer;
     private bool hasPendingRespawn;
-    private readonly List<TotemBlockDetector> pendingDestroyBlocks = new List<TotemBlockDetector>();
-    private int lastPendingDestroyProcessFrame = -1;
-    private readonly TowerSnapshot towerSnapshot = new TowerSnapshot();
-    private bool hasTowerSnapshot;
-    private float blockBaseInitialY;
-    private Quaternion blockBaseInitialRotation;
-    private bool isBlockBaseAnimating;
     private bool spawnBlockAfterBaseAnimation;
-    private float blockBaseAnimationTimer;
-    private Vector3 blockBaseAnimationStartPosition;
-    private Quaternion blockBaseAnimationStartRotation;
-    private Vector3 blockBaseAnimationTargetPosition;
-    private Quaternion blockBaseAnimationTargetRotation;
-    private PointerSource activePointerSource = PointerSource.None;
+    private const float CompletelyStillVelocitySqrThreshold = 0.0001f;
 
     private void Awake()
     {
@@ -122,67 +79,151 @@ public class CoreManager : MonoBehaviour
             return;
         }
 
-        line.SetParent(circle, false);
-
-        line.anchorMin = new Vector2(0.5f, 0.5f);
-        line.anchorMax = new Vector2(0.5f, 0.5f);
-        line.pivot = new Vector2(0.5f, 0.5f);
-        line.anchoredPosition = Vector2.zero;
-
-        UnityEngine.UI.Image rootImage = line.GetComponent<UnityEngine.UI.Image>();
-        if (rootImage != null)
+        if (aimVisualController == null)
         {
-            rootImage.enabled = false;
+            aimVisualController = GetComponent<AimVisualController>();
         }
 
-        EnsureLineGraphic();
-        EnsureTrajectoryLine();
-        CacheBlockBaseInitialPosition();
+        if (aimVisualController == null)
+        {
+            aimVisualController = gameObject.AddComponent<AimVisualController>();
+        }
+
+        if (!aimVisualController.Initialize(
+                circle,
+                line,
+                outerAreaCircle,
+                canvas,
+                lineGraphicHeight,
+                lineGraphicColor))
+        {
+            enabled = false;
+            return;
+        }
+
+        if (aimInputController == null)
+        {
+            aimInputController = GetComponent<AimInputController>();
+        }
+
+        if (aimInputController == null)
+        {
+            aimInputController = gameObject.AddComponent<AimInputController>();
+        }
+
+        if (trajectoryPreview == null)
+        {
+            trajectoryPreview = GetComponent<TrajectoryPreview>();
+        }
+
+        if (trajectoryPreview == null)
+        {
+            trajectoryPreview = gameObject.AddComponent<TrajectoryPreview>();
+        }
+
+        Color trajectoryDebugColor = lineGraphicColor;
+        trajectoryDebugColor.a = Mathf.Clamp(
+            trajectoryDebugColor.a <= 0f ? 0.85f : trajectoryDebugColor.a,
+            0.25f,
+            1f);
+
+        if (!trajectoryPreview.Initialize(
+                trajectoryLine,
+                trajectorySegmentCount,
+                trajectoryTimeStep,
+                showTrajectoryDebug,
+                trajectoryDebugColor))
+        {
+            enabled = false;
+            return;
+        }
+        if (blockBaseMover == null)
+        {
+            blockBaseMover = GetComponent<BlockBaseMover>();
+        }
+
+        if (blockBaseMover == null)
+        {
+            blockBaseMover = gameObject.AddComponent<BlockBaseMover>();
+        }
+
+        blockBaseMover.Configure(
+            blockBase,
+            enableBlockBaseMovement,
+            blockBaseMovementStartStackCount,
+            blockBaseMoveDuration,
+            blockBaseQuarterTurnDegrees,
+            enableBlockBaseDebugLogs);
+        blockBaseMover.CacheInitialState();
+
+        if (towerStackController == null)
+        {
+            towerStackController = GetComponent<TowerStackController>();
+        }
+
+        if (towerStackController == null)
+        {
+            towerStackController = gameObject.AddComponent<TowerStackController>();
+        }
+
+        towerStackController.SynchronizeStackedBlocks(stackedBlocks);
+
+        if (towerSnapshotValidator == null)
+        {
+            towerSnapshotValidator = GetComponent<TowerSnapshotValidator>();
+        }
+
+        if (towerSnapshotValidator == null)
+        {
+            towerSnapshotValidator = gameObject.AddComponent<TowerSnapshotValidator>();
+        }
+
+        towerSnapshotValidator.Configure(
+            snapshotYDropTolerance,
+            enableSnapshotDebugLogs,
+            GetTowerBaseReferenceTransform());
+
         RefreshStackedBlocksText();
-        ApplyBlockBaseStateInstant();
+        blockBaseMover.ApplyStateInstant(towerStackController.Count);
         SpawnBlock();
     }
 
     private void Update()
     {
-        bool hasPointerState = TryGetPointerFrameState(out PointerFrameState pointerState);
+        bool hasPointerState = aimInputController.TryGetPointerFrameState(
+            out AimInputController.PointerFrameState pointerState);
 
-        if (hasPointerState && pointerState.releasedThisFrame)
+        if (hasPointerState && pointerState.ReleasedThisFrame)
         {
             LaunchBlock();
             isAiming = false;
-            activePointerSource = PointerSource.None;
-            if (lineGraphicImage != null)
-            {
-                lineGraphicImage.enabled = false;
-            }
+            aimInputController.ClearActivePointerSource();
+            aimVisualController.HideAimLine();
         }
 
         UpdatePendingRespawn();
         UpdateBlockBaseAnimation();
         UpdateBalancedBlockState();
         UpdateUnstackedLaunchedBlockState();
-        UpdateTrajectoryDebug();
-        if (hasPointerState && pointerState.pressedThisFrame)
+        UpdateTrajectoryPreview();
+        if (hasPointerState && pointerState.PressedThisFrame)
         {
-            if (!hasUsedAimForCurrentBlock && !hasLaunchedCurrentBlock && IsPointerInsideAimArea(pointerState.screenPosition))
+            if (!hasUsedAimForCurrentBlock && !hasLaunchedCurrentBlock && IsPointerInsideAimArea(pointerState.ScreenPosition))
             {
                 isAiming = true;
                 hasUsedAimForCurrentBlock = true;
                 hasAimAngle = false;
-                activePointerSource = pointerState.source;
+                aimInputController.SetActivePointerSource(pointerState.Source);
 
-                if (lineGraphicImage != null)
-                {
-                    lineGraphicImage.enabled = true;
-                    currentLineLength = 0f;
-                }
+                aimVisualController.ShowAimLine();
+                currentLineLength = 0f;
+                aimVisualController.ResetAimLineLength();
             }
         }
 
         if (!isAiming)
         {
-            HideTrajectoryDebug();
+            trajectoryPreview.HidePreview();
             return;
         }
 
@@ -191,19 +232,13 @@ public class CoreManager : MonoBehaviour
             return;
         }
 
-        Vector2 pointerScreen = pointerState.screenPosition;
-        Camera uiCamera = GetUiCamera();
-
-        if (!RectTransformUtility.ScreenPointToLocalPointInRectangle(
-                circle,
-                pointerScreen,
-                uiCamera,
-                out Vector2 pointerLocal))
+        Vector2 pointerScreen = pointerState.ScreenPosition;
+        if (!aimVisualController.TryGetPointerLocalPosition(pointerScreen, out Vector2 pointerLocal))
         {
             return;
         }
 
-        Vector2 center = circle.rect.center;
+        Vector2 center = aimVisualController.GetAimCenter();
         Vector2 dir = pointerLocal - center;
         float targetAngle = Mathf.Atan2(-dir.y, -dir.x) * Mathf.Rad2Deg;
 
@@ -220,29 +255,14 @@ public class CoreManager : MonoBehaviour
                 aimDirectionResponse);
         }
 
-        line.anchoredPosition = Vector2.zero;
-        line.localRotation = Quaternion.Euler(0f, 0f, currentAimAngle);
-
-        if (lineGraphic != null)
+        if (aimVisualController.IsPointerInsideOuterArea(pointerScreen))
         {
-            lineGraphic.anchoredPosition = Vector2.zero;
-            lineGraphic.localRotation = Quaternion.identity;
-            lineGraphicHeight = Mathf.Clamp(lineGraphicHeight, 2f, 10f);
-
-            if (IsPointerInsideOuterArea(pointerScreen, uiCamera))
-            {
-                currentLineLength = dir.magnitude * 2f * aimDragSensitivity;
-            }
-
-            lineGraphic.sizeDelta = new Vector2(currentLineLength, lineGraphicHeight);
-
-            if (lineGraphicImage != null)
-            {
-                lineGraphicImage.color = lineGraphicColor;
-            }
+            currentLineLength = dir.magnitude * 2f * aimDragSensitivity;
         }
 
-        UpdateTrajectoryDebug();
+        aimVisualController.UpdateAimLine(currentAimAngle, currentLineLength);
+
+        UpdateTrajectoryPreview();
     }
 
     private void FixedUpdate()
@@ -266,7 +286,7 @@ public class CoreManager : MonoBehaviour
         hasLaunchedCurrentBlock = true;
         hasEnteredFallPhase = false;
         fallPhaseTimer = 0f;
-        HideTrajectoryDebug();
+        trajectoryPreview.HidePreview();
         hasAimAngle = false;
     }
 
@@ -280,18 +300,12 @@ public class CoreManager : MonoBehaviour
             return false;
         }
 
-        if (!TryGetPointerScreenPosition(out Vector2 pointerScreen))
+        if (!aimInputController.TryGetPointerScreenPosition(out Vector2 pointerScreen))
         {
             return false;
         }
 
-        Camera uiCamera = GetUiCamera();
-
-        if (!RectTransformUtility.ScreenPointToLocalPointInRectangle(
-                circle,
-                pointerScreen,
-                uiCamera,
-                out Vector2 pointerLocal))
+        if (!aimVisualController.TryGetPointerLocalPosition(pointerScreen, out _))
         {
             return false;
         }
@@ -305,7 +319,7 @@ public class CoreManager : MonoBehaviour
             return false;
         }
 
-        float maxLineLength = Mathf.Max(circle.rect.width, circle.rect.height);
+        float maxLineLength = aimVisualController.GetMaxAimLineLength();
         float forceMultiplier = Mathf.Clamp01(currentLineLength / maxLineLength);
 
         launchDirection = new Vector3(launchDirection2D.x, launchDirection2D.y, 0f);
@@ -313,95 +327,26 @@ public class CoreManager : MonoBehaviour
         return true;
     }
 
-    private void UpdateTrajectoryDebug()
+    private void UpdateTrajectoryPreview()
     {
-        if (!showTrajectoryDebug)
+        if (!isAiming)
         {
-            HideTrajectoryDebug();
-            return;
-        }
-
-        if (!isAiming || trajectoryLine == null || blockToLaunch == null)
-        {
-            HideTrajectoryDebug();
+            trajectoryPreview.HidePreview();
             return;
         }
 
         if (!TryGetLaunchParameters(out Vector3 launchDirection, out float launchImpulse))
         {
-            HideTrajectoryDebug();
+            trajectoryPreview.HidePreview();
             return;
         }
 
-        float mass = Mathf.Max(0.0001f, blockToLaunch.mass);
-        Vector3 initialVelocity = launchDirection * (launchImpulse / mass);
-        Vector3 startPosition = blockToLaunch.position;
-        float predictedApexTime = GetPredictedLaunchApexTime(initialVelocity.y);
-
-        int segmentCount = Mathf.Max(2, trajectorySegmentCount);
-        float step = Mathf.Max(0.01f, trajectoryTimeStep);
-        float physicsStep = Mathf.Max(Time.fixedDeltaTime, 0.0001f);
-        float minimumSimulationTime = step * (segmentCount - 1);
-        float totalSimulationTime = Mathf.Max(minimumSimulationTime, predictedApexTime * 2.25f);
-        segmentCount = Mathf.Max(segmentCount, Mathf.CeilToInt(totalSimulationTime / step) + 1);
-
-        trajectoryLine.positionCount = segmentCount;
-        trajectoryLine.enabled = true;
-
-        Vector3 simulatedPosition = startPosition;
-        Vector3 simulatedVelocity = initialVelocity;
-        float simulatedFallTimer = 0f;
-        bool simulatedFallPhase = false;
-        float simulatedTime = 0f;
-
-        for (int i = 0; i < segmentCount; i++)
-        {
-            float targetTime = i * step;
-
-            while (simulatedTime < targetTime)
-            {
-                float deltaTime = Mathf.Min(physicsStep, targetTime - simulatedTime);
-
-                if (!simulatedFallPhase &&
-                    simulatedTime >= predictedApexTime)
-                {
-                    simulatedFallPhase = true;
-                    simulatedFallTimer = 0f;
-                }
-
-                Vector3 totalGravity = Physics.gravity;
-                if (simulatedFallPhase)
-                {
-                    simulatedFallTimer += deltaTime;
-
-                    float blendT = apexFallBlendTime <= 0f
-                        ? 1f
-                        : Mathf.Clamp01(simulatedFallTimer / apexFallBlendTime);
-
-                    float gravityMultiplier = Mathf.Lerp(1f, apexFallGravityMultiplier, blendT);
-                    totalGravity = Physics.gravity * gravityMultiplier;
-                }
-
-                simulatedVelocity += totalGravity * deltaTime;
-                simulatedPosition += simulatedVelocity * deltaTime;
-                simulatedTime += deltaTime;
-            }
-
-            trajectoryLine.SetPosition(i, simulatedPosition);
-        }
-
-        trajectoryVisible = true;
-    }
-
-    private void HideTrajectoryDebug()
-    {
-        if (trajectoryLine != null && trajectoryVisible)
-        {
-            trajectoryLine.enabled = false;
-            trajectoryLine.positionCount = 0;
-        }
-
-        trajectoryVisible = false;
+        trajectoryPreview.ShowPreview(
+            blockToLaunch,
+            launchDirection,
+            launchImpulse,
+            apexFallGravityMultiplier,
+            apexFallBlendTime);
     }
 
     private void SpawnBlock()
@@ -416,7 +361,7 @@ public class CoreManager : MonoBehaviour
             return;
         }
 
-        if (pendingDestroyBlocks.Count > 0)
+        if (towerStackController.PendingDestroyCount > 0)
         {
             StartPendingSpawn(spawnDelayAfterBlockBaseMove);
             return;
@@ -424,7 +369,7 @@ public class CoreManager : MonoBehaviour
 
         CleanupInvalidStackedBlocks();
 
-        if (pendingDestroyBlocks.Count > 0)
+        if (towerStackController.PendingDestroyCount > 0)
         {
             StartPendingSpawn(spawnDelayAfterBlockBaseMove);
             return;
@@ -441,21 +386,10 @@ public class CoreManager : MonoBehaviour
             currentBlockDetector = blockToLaunch.gameObject.AddComponent<TotemBlockDetector>();
         }
 
-        balancedTimer = 0f;
-        hasSpawnedNextBlock = false;
-        hasUsedAimForCurrentBlock = false;
-        hasLaunchedCurrentBlock = false;
-        hasAimAngle = false;
-        unstackedBlockQuietTimer = 0f;
-        isAiming = false;
-        currentLineLength = 0f;
-        hasPendingRespawn = false;
-        respawnTimer = 0f;
-
-        if (lineGraphicImage != null)
-        {
-            lineGraphicImage.enabled = false;
-        }
+        ResetCurrentBlockRuntimeState();
+        ResetAimState();
+        ResetLaunchState();
+        ResetRespawnState();
     }
 
     private void UpdateBalancedBlockState()
@@ -465,7 +399,7 @@ public class CoreManager : MonoBehaviour
             return;
         }
 
-        if (isBlockBaseAnimating)
+        if (blockBaseMover.IsAnimating)
         {
             return;
         }
@@ -499,14 +433,16 @@ public class CoreManager : MonoBehaviour
 
         RegisterCurrentBlockAsStacked();
         StopCurrentBlockMotion();
-        CaptureTowerSnapshot();
+        towerSnapshotValidator.CaptureSnapshot(
+            towerStackController.StackedBlocks,
+            GetTowerBaseReferenceTransform());
         hasSpawnedNextBlock = true;
         RefreshBlockBasePosition(true);
     }
 
     private void UpdateUnstackedLaunchedBlockState()
     {
-        if (!hasLaunchedCurrentBlock || hasPendingRespawn || isBlockBaseAnimating)
+        if (!hasLaunchedCurrentBlock || hasPendingRespawn || blockBaseMover.IsAnimating)
         {
             unstackedBlockQuietTimer = 0f;
             return;
@@ -518,15 +454,15 @@ public class CoreManager : MonoBehaviour
             return;
         }
 
-        if (stackedBlocks.Contains(currentBlockDetector) || currentBlockDetector.IsBalanced)
+        if (towerStackController.Contains(currentBlockDetector) || currentBlockDetector.IsBalanced)
         {
             unstackedBlockQuietTimer = 0f;
             return;
         }
 
         bool isCompletelyStill =
-            blockToLaunch.linearVelocity.sqrMagnitude <= 0.0001f &&
-            blockToLaunch.angularVelocity.sqrMagnitude <= 0.0001f;
+            blockToLaunch.linearVelocity.sqrMagnitude <= CompletelyStillVelocitySqrThreshold &&
+            blockToLaunch.angularVelocity.sqrMagnitude <= CompletelyStillVelocitySqrThreshold;
 
         if (!isCompletelyStill)
         {
@@ -554,6 +490,7 @@ public class CoreManager : MonoBehaviour
         unstackedBlockQuietTimer = 0f;
     }
 
+    // Keep respawn pending until cleanup and tower settling are complete.
     private void UpdatePendingRespawn()
     {
         if (!hasPendingRespawn)
@@ -568,7 +505,7 @@ public class CoreManager : MonoBehaviour
 
         CleanupInvalidStackedBlocks();
 
-        if (pendingDestroyBlocks.Count > 0)
+        if (towerStackController.PendingDestroyCount > 0)
         {
             return;
         }
@@ -602,76 +539,24 @@ public class CoreManager : MonoBehaviour
             return;
         }
 
-        if (stackedBlocks.Contains(currentBlockDetector))
+        if (towerStackController.RegisterBlock(currentBlockDetector))
         {
-            return;
-        }
-
-        stackedBlocks.Add(currentBlockDetector);
-        RefreshStackedBlocksText();
-    }
-
-    private void CaptureTowerSnapshot()
-    {
-        towerSnapshot.blocks.Clear();
-
-        for (int i = 0; i < stackedBlocks.Count; i++)
-        {
-            TotemBlockDetector detector = stackedBlocks[i];
-
-            if (detector == null)
-            {
-                continue;
-            }
-
-            Vector3 localPosition = GetTowerBaseReferenceTransform().InverseTransformPoint(detector.transform.position);
-            Quaternion localRotation =
-                Quaternion.Inverse(GetTowerBaseReferenceTransform().rotation) *
-                detector.transform.rotation;
-
-            towerSnapshot.blocks.Add(new BlockSnapshotEntry
-            {
-                block = detector,
-                stackIndex = i,
-                localPosition = localPosition,
-                localRotation = localRotation,
-                localY = localPosition.y,
-                wasBalanced = detector.IsBalanced
-            });
-        }
-
-        towerSnapshot.capturedAtTime = Time.time;
-        hasTowerSnapshot = towerSnapshot.blocks.Count > 0;
-
-        if (enableSnapshotDebugLogs)
-        {
-            Debug.Log(
-                $"[Snapshot] Captured tower snapshot with {towerSnapshot.blocks.Count} block(s) at t={towerSnapshot.capturedAtTime:0.00}.");
+            RefreshStackedBlocksText();
         }
     }
 
+    // Queue or remove fallen blocks while preserving the one-at-a-time cleanup flow.
     private void CleanupInvalidStackedBlocks()
     {
-        bool listChanged = false;
+        bool listChanged = towerStackController.RemoveNullStackedBlocks();
 
-        for (int i = stackedBlocks.Count - 1; i >= 0; i--)
+        for (int i = towerStackController.Count - 1; i >= 0; i--)
         {
-            TotemBlockDetector detector = stackedBlocks[i];
+            TotemBlockDetector detector = towerStackController.StackedBlocks[i];
 
-            if (detector == null)
-            {
-                stackedBlocks.RemoveAt(i);
-                listChanged = true;
-                continue;
-            }
-
-            BlockSnapshotEntry snapshotEntry = GetSnapshotEntry(detector);
-            if (snapshotEntry == null)
-            {
-                continue;
-            }
-
-            if (!HasBlockDroppedOutOfTower(detector, snapshotEntry))
+            if (!towerSnapshotValidator.HasBlockDroppedOutOfTower(
+                    detector,
+                    GetTowerBaseReferenceTransform()))
             {
                 continue;
             }
@@ -686,8 +571,8 @@ public class CoreManager : MonoBehaviour
                     ResetCurrentBlockRemovalState();
                 }
 
-                pendingDestroyBlocks.Remove(detector);
-                stackedBlocks.RemoveAt(i);
+                towerStackController.RemovePendingDestroy(detector);
+                towerStackController.RemoveBlock(detector);
 
                 if (enableSnapshotDebugLogs)
                 {
@@ -700,9 +585,9 @@ public class CoreManager : MonoBehaviour
                 continue;
             }
 
-            if (!pendingDestroyBlocks.Contains(detector))
+            if (!towerStackController.ContainsPendingDestroy(detector))
             {
-                pendingDestroyBlocks.Add(detector);
+                towerStackController.TryQueuePendingDestroy(detector);
 
                 if (enableSnapshotDebugLogs)
                 {
@@ -711,7 +596,7 @@ public class CoreManager : MonoBehaviour
                 }
             }
 
-            stackedBlocks.RemoveAt(i);
+            towerStackController.RemoveBlock(detector);
             listChanged = true;
         }
 
@@ -726,9 +611,9 @@ public class CoreManager : MonoBehaviour
 
     private bool AreStackedBlocksFullySettled()
     {
-        for (int i = 0; i < stackedBlocks.Count; i++)
+        for (int i = 0; i < towerStackController.Count; i++)
         {
-            TotemBlockDetector detector = stackedBlocks[i];
+            TotemBlockDetector detector = towerStackController.StackedBlocks[i];
 
             if (detector == null)
             {
@@ -745,7 +630,10 @@ public class CoreManager : MonoBehaviour
                 continue;
             }
 
-            if (!IsBlockRecoveredBySnapshot(detector))
+            if (!towerSnapshotValidator.IsBlockRecoveredBySnapshot(
+                    detector,
+                    GetTowerBaseReferenceTransform(),
+                    IsBlockCompletelyStill))
             {
                 return false;
             }
@@ -756,119 +644,12 @@ public class CoreManager : MonoBehaviour
 
     private bool ProcessOnePendingDestroyBlock()
     {
-        if (pendingDestroyBlocks.Count == 0)
-        {
-            return false;
-        }
-
-        if (lastPendingDestroyProcessFrame == Time.frameCount)
-        {
-            return false;
-        }
-
-        for (int i = 0; i < pendingDestroyBlocks.Count; i++)
-        {
-            TotemBlockDetector detector = pendingDestroyBlocks[i];
-
-            if (detector == null)
-            {
-                pendingDestroyBlocks.RemoveAt(i);
-                return true;
-            }
-
-            if (!IsBlockCompletelyStill(detector))
-            {
-                continue;
-            }
-
-            if (detector == currentBlockDetector ||
-                (blockToLaunch != null &&
-                 detector.TryGetComponent<Rigidbody>(out Rigidbody detectorRigidbody) &&
-                 blockToLaunch == detectorRigidbody))
-            {
-                ResetCurrentBlockRemovalState();
-            }
-
-            Destroy(detector.gameObject);
-            pendingDestroyBlocks.RemoveAt(i);
-            lastPendingDestroyProcessFrame = Time.frameCount;
-
-            if (enableSnapshotDebugLogs)
-            {
-                Debug.Log(
-                    $"[Snapshot] Destroyed '{detector.name}' after it settled outside the snapshot tower.");
-            }
-
-            return true;
-        }
-
-        return false;
-    }
-
-    private BlockSnapshotEntry GetSnapshotEntry(TotemBlockDetector detector)
-    {
-        if (detector == null || !hasTowerSnapshot)
-        {
-            return null;
-        }
-
-        for (int i = 0; i < towerSnapshot.blocks.Count; i++)
-        {
-            BlockSnapshotEntry entry = towerSnapshot.blocks[i];
-
-            if (entry != null && entry.block == detector)
-            {
-                return entry;
-            }
-        }
-
-        return null;
-    }
-
-    private bool HasBlockDroppedOutOfTower(
-        TotemBlockDetector detector,
-        BlockSnapshotEntry snapshotEntry)
-    {
-        if (detector == null || snapshotEntry == null)
-        {
-            return false;
-        }
-
-        Transform reference = GetTowerBaseReferenceTransform();
-        Vector3 localPosition = reference.InverseTransformPoint(detector.transform.position);
-
-        return localPosition.y < snapshotEntry.localY - snapshotYDropTolerance;
-    }
-
-    private bool IsBlockRecoveredBySnapshot(TotemBlockDetector detector)
-    {
-        if (detector == null || !IsBlockCompletelyStill(detector))
-        {
-            return false;
-        }
-
-        BlockSnapshotEntry snapshotEntry = GetSnapshotEntry(detector);
-        if (snapshotEntry == null)
-        {
-            return false;
-        }
-
-        Transform reference = GetTowerBaseReferenceTransform();
-        Vector3 localPosition = reference.InverseTransformPoint(detector.transform.position);
-        float currentYDelta = Mathf.Abs(localPosition.y - snapshotEntry.localY);
-
-        if (currentYDelta > snapshotYDropTolerance)
-        {
-            return false;
-        }
-
-        if (enableSnapshotDebugLogs && !detector.IsBalanced)
-        {
-            Debug.Log(
-                $"[Snapshot] '{detector.name}' recovered tower stability through snapshot validation. CurrentY={localPosition.y:0.000}, SnapshotY={snapshotEntry.localY:0.000}, Delta={currentYDelta:0.000}");
-        }
-
-        return true;
+        return towerStackController.ProcessOnePendingDestroyBlock(
+            currentBlockDetector,
+            blockToLaunch,
+            ResetCurrentBlockRemovalState,
+            IsBlockCompletelyStill,
+            enableSnapshotDebugLogs);
     }
 
     private bool IsBlockCompletelyStill(TotemBlockDetector detector)
@@ -878,22 +659,35 @@ public class CoreManager : MonoBehaviour
             return false;
         }
 
-        return rigidbody.linearVelocity.sqrMagnitude <= 0.0001f &&
-               rigidbody.angularVelocity.sqrMagnitude <= 0.0001f;
+        return rigidbody.linearVelocity.sqrMagnitude <= CompletelyStillVelocitySqrThreshold &&
+               rigidbody.angularVelocity.sqrMagnitude <= CompletelyStillVelocitySqrThreshold;
     }
 
     private void ResetCurrentBlockRemovalState()
     {
-        currentBlockDetector = null;
-        blockToLaunch = null;
-        isAiming = false;
-        currentLineLength = 0f;
-        balancedTimer = 0f;
-        hasSpawnedNextBlock = false;
+        ResetCurrentBlockReferences();
+        ResetAimState();
+        ResetLaunchState();
+        ResetRespawnState();
+        ResetCurrentBlockRuntimeState();
+
         hasPendingRespawn = true;
         respawnTimer = balancedHoldTime;
-        spawnBlockAfterBaseAnimation = false;
+    }
+
+    private void ResetAimState()
+    {
+        isAiming = false;
+        currentLineLength = 0f;
         hasUsedAimForCurrentBlock = false;
+        hasAimAngle = false;
+
+        aimInputController.ClearActivePointerSource();
+        aimVisualController.HideAimLine();
+    }
+
+    private void ResetLaunchState()
+    {
         hasLaunchedCurrentBlock = false;
         hasEnteredFallPhase = false;
         fallPhaseTimer = 0f;
@@ -901,13 +695,26 @@ public class CoreManager : MonoBehaviour
         launchApexY = 0f;
         launchApexTime = 0f;
         launchStartFixedTime = 0f;
-        hasAimAngle = false;
         unstackedBlockQuietTimer = 0f;
+    }
 
-        if (lineGraphicImage != null)
-        {
-            lineGraphicImage.enabled = false;
-        }
+    private void ResetRespawnState()
+    {
+        hasPendingRespawn = false;
+        respawnTimer = 0f;
+        spawnBlockAfterBaseAnimation = false;
+    }
+
+    private void ResetCurrentBlockReferences()
+    {
+        currentBlockDetector = null;
+        blockToLaunch = null;
+    }
+
+    private void ResetCurrentBlockRuntimeState()
+    {
+        balancedTimer = 0f;
+        hasSpawnedNextBlock = false;
     }
 
     public void RemoveStackedBlock(TotemBlockDetector blockDetector)
@@ -919,7 +726,7 @@ public class CoreManager : MonoBehaviour
 
         bool wasCurrentControlledBlock = false;
 
-        if (stackedBlocks.Remove(blockDetector))
+        if (towerStackController.RemoveBlock(blockDetector))
         {
             RefreshStackedBlocksText();
             RefreshBlockBasePosition(false);
@@ -927,7 +734,6 @@ public class CoreManager : MonoBehaviour
 
         if (currentBlockDetector == blockDetector)
         {
-            currentBlockDetector = null;
             wasCurrentControlledBlock = true;
         }
 
@@ -935,58 +741,21 @@ public class CoreManager : MonoBehaviour
         {
             if (blockToLaunch == detectorRigidbody)
             {
-                blockToLaunch = null;
                 wasCurrentControlledBlock = true;
             }
         }
 
         if (wasCurrentControlledBlock)
         {
-            isAiming = false;
-            currentLineLength = 0f;
+            ResetCurrentBlockReferences();
+            ResetAimState();
+            ResetLaunchState();
+            ResetRespawnState();
+            ResetCurrentBlockRuntimeState();
 
-            if (lineGraphicImage != null)
-            {
-                lineGraphicImage.enabled = false;
-            }
-
-            balancedTimer = 0f;
-            hasSpawnedNextBlock = false;
             hasPendingRespawn = true;
             respawnTimer = balancedHoldTime;
-            spawnBlockAfterBaseAnimation = false;
-            hasUsedAimForCurrentBlock = false;
-            hasLaunchedCurrentBlock = false;
-            unstackedBlockQuietTimer = 0f;
         }
-    }
-
-    private void CacheBlockBaseInitialPosition()
-    {
-        if (blockBase == null)
-        {
-            return;
-        }
-
-        blockBaseInitialY = blockBase.position.y;
-        blockBaseInitialRotation = blockBase.rotation;
-    }
-
-    private void ApplyBlockBaseStateInstant()
-    {
-        if (blockBase == null)
-        {
-            return;
-        }
-
-        int movementStepCount = GetBlockBaseMovementStepCount();
-        float targetY = blockBaseInitialY + movementStepCount;
-        Vector3 position = blockBase.position;
-        position.y = targetY;
-        blockBase.position = position;
-
-        float targetRotation = blockBaseQuarterTurnDegrees * movementStepCount;
-        blockBase.rotation = blockBaseInitialRotation * Quaternion.Euler(0f, targetRotation, 0f);
     }
 
     private void RefreshBlockBasePosition(bool spawnAfterAnimation)
@@ -1004,82 +773,36 @@ public class CoreManager : MonoBehaviour
         ProcessOnePendingDestroyBlock();
         CleanupInvalidStackedBlocks();
 
-        int movementStepCount = GetBlockBaseMovementStepCount();
-        Vector3 targetPosition = blockBase.position;
-        targetPosition.y = blockBaseInitialY + movementStepCount;
+        blockBaseMover.Configure(
+            blockBase,
+            enableBlockBaseMovement,
+            blockBaseMovementStartStackCount,
+            blockBaseMoveDuration,
+            blockBaseQuarterTurnDegrees,
+            enableBlockBaseDebugLogs);
 
-        Quaternion targetRotation =
-            blockBaseInitialRotation *
-            Quaternion.Euler(0f, blockBaseQuarterTurnDegrees * movementStepCount, 0f);
+        blockBaseMover.RefreshPosition(
+        towerStackController.Count,
+            true,
+            out bool animationStarted);
 
-        bool hasMeaningfulBaseChange =
-            Vector3.Distance(blockBase.position, targetPosition) > 0.001f ||
-            Quaternion.Angle(blockBase.rotation, targetRotation) > 0.1f;
-
-        if (!hasMeaningfulBaseChange || blockBaseMoveDuration <= Mathf.Epsilon)
+        if (animationStarted)
         {
-            blockBase.position = targetPosition;
-            blockBase.rotation = targetRotation;
-
-            if (spawnAfterAnimation)
-            {
-                StartPendingSpawn(balancedHoldTime);
-            }
-
-            return;
+            spawnBlockAfterBaseAnimation = spawnAfterAnimation;
         }
 
-        blockBaseAnimationStartPosition = blockBase.position;
-        blockBaseAnimationStartRotation = blockBase.rotation;
-        blockBaseAnimationTargetPosition = targetPosition;
-        blockBaseAnimationTargetRotation = targetRotation;
-        blockBaseAnimationTimer = 0f;
-        isBlockBaseAnimating = true;
-        spawnBlockAfterBaseAnimation = spawnAfterAnimation;
-    }
-
-    private int GetBlockBaseMovementStepCount()
-    {
-        if (blockBase == null || !enableBlockBaseMovement)
+        if (!animationStarted && spawnAfterAnimation)
         {
-            return 0;
+            StartPendingSpawn(balancedHoldTime);
         }
-
-        int stackedCount = stackedBlocks.Count;
-        if (stackedCount < blockBaseMovementStartStackCount)
-        {
-            return 0;
-        }
-
-        return stackedCount - blockBaseMovementStartStackCount + 1;
     }
 
     private void UpdateBlockBaseAnimation()
     {
-        if (!isBlockBaseAnimating || blockBase == null)
+        if (!blockBaseMover.UpdateAnimation())
         {
             return;
         }
-
-        blockBaseAnimationTimer += Time.deltaTime;
-        float t = Mathf.Clamp01(blockBaseAnimationTimer / blockBaseMoveDuration);
-        float smoothT = t * t * (3f - 2f * t);
-
-        blockBase.position = Vector3.Lerp(
-            blockBaseAnimationStartPosition,
-            blockBaseAnimationTargetPosition,
-            smoothT);
-        blockBase.rotation = Quaternion.Slerp(
-            blockBaseAnimationStartRotation,
-            blockBaseAnimationTargetRotation,
-            smoothT);
-
-        if (t < 1f)
-        {
-            return;
-        }
-
-        isBlockBaseAnimating = false;
 
         if (spawnBlockAfterBaseAnimation)
         {
@@ -1111,7 +834,7 @@ public class CoreManager : MonoBehaviour
             return;
         }
 
-        stackedBlocksText.text = stackedBlocks.Count.ToString();
+        stackedBlocksText.text = towerStackController.Count.ToString();
     }
 
     private void StopCurrentBlockMotion()
@@ -1129,6 +852,7 @@ public class CoreManager : MonoBehaviour
         hasLaunchApexData = false;
     }
 
+    // Add extra gravity only after the predicted apex of the launch trajectory.
     private void UpdateLaunchFallBehavior()
     {
         if (!hasLaunchedCurrentBlock || blockToLaunch == null || !hasLaunchApexData)
@@ -1208,18 +932,6 @@ public class CoreManager : MonoBehaviour
         hasLaunchApexData = true;
     }
 
-    private float GetPredictedLaunchApexTime(float initialVelocityY)
-    {
-        float gravityY = Physics.gravity.y;
-
-        if (gravityY < -0.0001f && initialVelocityY > 0f)
-        {
-            return initialVelocityY / -gravityY;
-        }
-
-        return 0f;
-    }
-
     private void FaceBlockTowardsBase()
     {
         if (baseTargetTransform == null || blockToLaunch == null)
@@ -1240,223 +952,7 @@ public class CoreManager : MonoBehaviour
 
     private bool IsPointerInsideAimArea(Vector2 pointerScreen)
     {
-        Camera uiCamera = GetUiCamera();
-
-        return IsPointerInsideCircle(pointerScreen, uiCamera) || IsPointerInsideOuterArea(pointerScreen, uiCamera);
+        return aimVisualController.IsPointerInsideAimArea(pointerScreen);
     }
 
-    private bool TryGetPointerScreenPosition(out Vector2 pointerScreen)
-    {
-        if (TryGetPointerFrameState(out PointerFrameState pointerState))
-        {
-            pointerScreen = pointerState.screenPosition;
-            return true;
-        }
-
-        pointerScreen = Vector2.zero;
-        return false;
-    }
-
-    private bool TryGetPointerFrameState(out PointerFrameState pointerState)
-    {
-        if (activePointerSource == PointerSource.Touch)
-        {
-            return TryGetTouchPointerState(out pointerState);
-        }
-
-        if (activePointerSource == PointerSource.Mouse)
-        {
-            return TryGetMousePointerState(out pointerState);
-        }
-
-        if (TryGetTouchPointerState(out pointerState))
-        {
-            return true;
-        }
-
-        if (TryGetMousePointerState(out pointerState))
-        {
-            return true;
-        }
-
-        pointerState = default;
-        return false;
-    }
-
-    private bool TryGetTouchPointerState(out PointerFrameState pointerState)
-    {
-        pointerState = default;
-
-        Touchscreen touchScreen = Touchscreen.current;
-        if (touchScreen == null)
-        {
-            return false;
-        }
-
-        TouchControl touch = touchScreen.primaryTouch;
-        if (touch == null)
-        {
-            return false;
-        }
-
-        bool isActive = touch.press.isPressed || touch.press.wasPressedThisFrame || touch.press.wasReleasedThisFrame;
-        if (!isActive)
-        {
-            return false;
-        }
-
-        pointerState.source = PointerSource.Touch;
-        pointerState.screenPosition = touch.position.ReadValue();
-        pointerState.pressedThisFrame = touch.press.wasPressedThisFrame;
-        pointerState.releasedThisFrame = touch.press.wasReleasedThisFrame;
-        return true;
-    }
-
-    private bool TryGetMousePointerState(out PointerFrameState pointerState)
-    {
-        pointerState = default;
-
-        Mouse mouse = Mouse.current;
-        if (mouse == null)
-        {
-            return false;
-        }
-
-        bool isActive = mouse.leftButton.isPressed ||
-                        mouse.leftButton.wasPressedThisFrame ||
-                        mouse.leftButton.wasReleasedThisFrame;
-
-        if (!isActive)
-        {
-            return false;
-        }
-
-        pointerState.source = PointerSource.Mouse;
-        pointerState.screenPosition = mouse.position.ReadValue();
-        pointerState.pressedThisFrame = mouse.leftButton.wasPressedThisFrame;
-        pointerState.releasedThisFrame = mouse.leftButton.wasReleasedThisFrame;
-        return true;
-    }
-
-    private bool IsPointerInsideCircle(Vector2 pointerScreen, Camera uiCamera)
-    {
-        if (!RectTransformUtility.ScreenPointToLocalPointInRectangle(
-                circle,
-                pointerScreen,
-                uiCamera,
-                out Vector2 pointerLocal))
-        {
-            return false;
-        }
-
-        return circle.rect.Contains(pointerLocal);
-    }
-
-    private bool IsPointerInsideOuterArea(Vector2 pointerScreen, Camera uiCamera)
-    {
-        if (outerAreaCircle == null)
-        {
-            return true;
-        }
-
-        if (!RectTransformUtility.ScreenPointToLocalPointInRectangle(
-                outerAreaCircle,
-                pointerScreen,
-                uiCamera,
-                out Vector2 pointerLocal))
-        {
-            return false;
-        }
-
-        return outerAreaCircle.rect.Contains(pointerLocal);
-    }
-
-    private void EnsureLineGraphic()
-    {
-        Transform existing = line.Find("LineGraphic");
-        if (existing != null)
-        {
-            lineGraphic = existing as RectTransform;
-            lineGraphicImage = existing.GetComponent<UnityEngine.UI.Image>();
-        }
-        else
-        {
-            GameObject graphicObject = new GameObject("LineGraphic", typeof(RectTransform), typeof(UnityEngine.UI.Image));
-            graphicObject.transform.SetParent(line, false);
-
-            lineGraphic = graphicObject.GetComponent<RectTransform>();
-            lineGraphicImage = graphicObject.GetComponent<UnityEngine.UI.Image>();
-        }
-
-        if (lineGraphic == null || lineGraphicImage == null)
-        {
-            return;
-        }
-
-        lineGraphic.anchorMin = new Vector2(0.5f, 0.5f);
-        lineGraphic.anchorMax = new Vector2(0.5f, 0.5f);
-        lineGraphic.pivot = new Vector2(0f, 0.5f);
-        lineGraphic.anchoredPosition = Vector2.zero;
-        lineGraphic.localScale = Vector3.one;
-        lineGraphicHeight = Mathf.Clamp(lineGraphicHeight, 2f, 10f);
-        lineGraphic.sizeDelta = new Vector2(lineGraphic.sizeDelta.x, lineGraphicHeight);
-
-        lineGraphicImage.type = UnityEngine.UI.Image.Type.Simple;
-        lineGraphicImage.raycastTarget = false;
-        lineGraphicImage.sprite = CreateWhiteSprite();
-        lineGraphicImage.color = lineGraphicColor;
-        lineGraphicImage.enabled = false;
-    }
-
-    private void EnsureTrajectoryLine()
-    {
-        if (trajectoryLine == null)
-        {
-            trajectoryLine = GetComponent<LineRenderer>();
-        }
-
-        if (trajectoryLine == null)
-        {
-            trajectoryLine = gameObject.AddComponent<LineRenderer>();
-        }
-
-        trajectoryLine.useWorldSpace = true;
-        trajectoryLine.alignment = LineAlignment.View;
-        trajectoryLine.textureMode = LineTextureMode.Stretch;
-        trajectoryLine.widthMultiplier = 0.06f;
-        trajectoryLine.positionCount = 0;
-        trajectoryLine.enabled = false;
-
-        if (trajectoryLine.material == null)
-        {
-            Shader shader = Shader.Find("Sprites/Default");
-            if (shader != null)
-            {
-                trajectoryLine.material = new Material(shader);
-            }
-        }
-
-        Color debugColor = lineGraphicColor;
-        debugColor.a = Mathf.Clamp(debugColor.a <= 0f ? 0.85f : debugColor.a, 0.25f, 1f);
-        trajectoryLine.startColor = debugColor;
-        trajectoryLine.endColor = debugColor;
-    }
-
-    private static Sprite CreateWhiteSprite()
-    {
-        return Sprite.Create(
-            Texture2D.whiteTexture,
-            new Rect(0f, 0f, 1f, 1f),
-            new Vector2(0.5f, 0.5f));
-    }
-
-    private Camera GetUiCamera()
-    {
-        if (canvas == null || canvas.renderMode == RenderMode.ScreenSpaceOverlay)
-        {
-            return null;
-        }
-
-        return canvas.worldCamera != null ? canvas.worldCamera : Camera.main;
-    }
 }

@@ -4,6 +4,8 @@ using System.Collections.Generic;
 [RequireComponent(typeof(Rigidbody))]
 public class TotemBlockDetector : MonoBehaviour
 {
+    private const float SupportRelaxedStillnessMultiplier = 4f;
+
     [SerializeField] private string supportingBlockTag = "TotemBlock";
     [SerializeField, Range(0f, 1f)] private float supportNormalThreshold = 0.5f;
     [SerializeField, Min(0f)] private float linearBalanceThreshold = 0.05f;
@@ -15,6 +17,9 @@ public class TotemBlockDetector : MonoBehaviour
 
     private Rigidbody cachedRigidbody;
     private readonly HashSet<Collider> supportColliders = new HashSet<Collider>();
+
+    private float LinearBalanceThresholdSqr => linearBalanceThreshold * linearBalanceThreshold;
+    private float AngularBalanceThresholdSqr => angularBalanceThreshold * angularBalanceThreshold;
 
     private void Awake()
     {
@@ -34,9 +39,10 @@ public class TotemBlockDetector : MonoBehaviour
         }
 
         bool isSupportingContact = false;
+        // Support detection is intentionally more forgiving while the block settles.
         bool isNearlyStill = cachedRigidbody != null &&
-                             cachedRigidbody.linearVelocity.sqrMagnitude <= linearBalanceThreshold * linearBalanceThreshold * 4f &&
-                             cachedRigidbody.angularVelocity.sqrMagnitude <= angularBalanceThreshold * angularBalanceThreshold * 4f;
+                             cachedRigidbody.linearVelocity.sqrMagnitude <= LinearBalanceThresholdSqr * SupportRelaxedStillnessMultiplier &&
+                             cachedRigidbody.angularVelocity.sqrMagnitude <= AngularBalanceThresholdSqr * SupportRelaxedStillnessMultiplier;
 
         for (int i = 0; i < collision.contactCount; i++)
         {
@@ -59,6 +65,7 @@ public class TotemBlockDetector : MonoBehaviour
             supportColliders.Remove(collision.collider);
         }
 
+        // IsSupported means that a valid supporting block contact is present.
         IsSupported = supportColliders.Count > 0;
         UpdateBalanceState();
     }
@@ -83,9 +90,10 @@ public class TotemBlockDetector : MonoBehaviour
             return;
         }
 
+        // IsBalanced combines valid support with the strict movement thresholds.
         bool isMovingSlowly =
-            cachedRigidbody.linearVelocity.sqrMagnitude <= linearBalanceThreshold * linearBalanceThreshold &&
-            cachedRigidbody.angularVelocity.sqrMagnitude <= angularBalanceThreshold * angularBalanceThreshold;
+            cachedRigidbody.linearVelocity.sqrMagnitude <= LinearBalanceThresholdSqr &&
+            cachedRigidbody.angularVelocity.sqrMagnitude <= AngularBalanceThresholdSqr;
 
         isBalanced = IsSupported && isMovingSlowly;
     }
