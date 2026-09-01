@@ -1245,14 +1245,19 @@ MonoBehaviour:
   trajectorySegmentCount: 50
   trajectoryTimeStep: 0.08
   showTrajectoryDebug: 1
+  trajectoryPreview: {fileID: 0}
   aimDragSensitivity: 0.4
   aimDirectionResponse: 0.08
+  aimVisualController: {fileID: 0}
+  aimInputController: {fileID: 0}
   stackedBlocksText: {fileID: 613976946}
   blockPrefab: {fileID: 7374580289148323530, guid: 4618d5188ff336247b10bc319fb54529, type: 3}
   blockSpawnPoint: {fileID: 446297543}
   baseTargetTransform: {fileID: 0}
   totemBase: {fileID: 1743001064}
   blockBase: {fileID: 2013776004}
+  blockBaseMover: {fileID: 0}
+  towerStackController: {fileID: 0}
   stackedBlocks: []
   maxLaunchImpulse: 26
   balancedHoldTime: 1
@@ -1266,6 +1271,8 @@ MonoBehaviour:
   unstackedBlockAutoDestroyDelay: 0.35
   snapshotYDropTolerance: 0.1
   enableSnapshotDebugLogs: 1
+  enableBlockBaseDebugLogs: 0
+  towerSnapshotValidator: {fileID: 0}
 --- !u!4 &1483525529
 Transform:
   m_ObjectHideFlags: 0
