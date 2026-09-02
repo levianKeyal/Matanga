@@ -1,12 +1,36 @@
 using UnityEngine;
+using UnityEngine.UI;
 
 public class TrajectoryPreview : MonoBehaviour
 {
+    [Header("Trajectory Preview")]
+    [SerializeField] private bool showTrajectoryDebug = true;
+    [SerializeField] private Button toggleTrajectoryButton;
+
     private LineRenderer trajectoryLine;
     private int trajectorySegmentCount;
     private float trajectoryTimeStep;
-    private bool showTrajectoryDebug;
     private bool trajectoryVisible;
+
+    public bool IsTrajectoryPreviewEnabled => showTrajectoryDebug;
+
+    private void OnEnable()
+    {
+        if (toggleTrajectoryButton != null)
+        {
+            toggleTrajectoryButton.onClick.AddListener(ToggleTrajectoryPreview);
+        }
+    }
+
+    private void OnDisable()
+    {
+        if (toggleTrajectoryButton != null)
+        {
+            toggleTrajectoryButton.onClick.RemoveListener(ToggleTrajectoryPreview);
+        }
+
+        HidePreview();
+    }
 
     public bool Initialize(
         LineRenderer lineReference,
@@ -18,10 +42,24 @@ public class TrajectoryPreview : MonoBehaviour
         trajectoryLine = lineReference;
         trajectorySegmentCount = segmentCount;
         trajectoryTimeStep = timeStep;
-        showTrajectoryDebug = showDebug;
 
         EnsureTrajectoryLine(debugColor);
         return trajectoryLine != null;
+    }
+
+    public void SetTrajectoryPreviewEnabled(bool enabled)
+    {
+        showTrajectoryDebug = enabled;
+
+        if (!showTrajectoryDebug)
+        {
+            HidePreview();
+        }
+    }
+
+    public void ToggleTrajectoryPreview()
+    {
+        SetTrajectoryPreviewEnabled(!showTrajectoryDebug);
     }
 
     public void ShowPreview(
