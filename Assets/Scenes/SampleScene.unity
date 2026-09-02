@@ -2249,7 +2249,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 5e1f806daaf14032b0aac13da1d56071, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::TrajectoryPreview
-  showTrajectoryDebug: 1
+  showTrajectoryDebug: 0
   toggleTrajectoryButton: {fileID: 571520479}
 --- !u!1 &1535001331
 GameObject:
