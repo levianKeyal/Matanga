@@ -2222,6 +2222,8 @@ MonoBehaviour:
   enableSnapshotDebugLogs: 1
   enableBlockBaseDebugLogs: 0
   towerSnapshotValidator: {fileID: 0}
+  blockBalanceEvaluationMode: 1
+  logBalanceEvaluationDifferences: 1
 --- !u!4 &1483525529
 Transform:
   m_ObjectHideFlags: 0
