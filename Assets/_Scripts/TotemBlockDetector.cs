@@ -1,6 +1,13 @@
 using UnityEngine;
 using System.Collections.Generic;
 
+public enum TotemBlockBalanceState
+{
+    Unsupported,
+    Balancing,
+    Balanced
+}
+
 [RequireComponent(typeof(Rigidbody))]
 public class TotemBlockDetector : MonoBehaviour
 {
@@ -11,15 +18,26 @@ public class TotemBlockDetector : MonoBehaviour
     [SerializeField, Min(0f)] private float linearBalanceThreshold = 0.05f;
     [SerializeField, Min(0f)] private float angularBalanceThreshold = 0.05f;
     [SerializeField] private bool isBalanced;
+    [SerializeField] private TotemBlockBalanceState balanceState = TotemBlockBalanceState.Unsupported;
+
+    [Header("Balance State Settings")]
+    [SerializeField, Min(0f)] private float balanceStateLinearVelocityThreshold = 0.05f;
+    [SerializeField, Min(0f)] private float balanceStateAngularVelocityThreshold = 0.05f;
 
     public bool IsSupported { get; private set; }
     public bool IsBalanced => isBalanced;
+    public TotemBlockBalanceState BalanceState => balanceState;
+    public bool IsBalancing => balanceState == TotemBlockBalanceState.Balancing;
 
     private Rigidbody cachedRigidbody;
     private readonly HashSet<Collider> supportColliders = new HashSet<Collider>();
 
     private float LinearBalanceThresholdSqr => linearBalanceThreshold * linearBalanceThreshold;
     private float AngularBalanceThresholdSqr => angularBalanceThreshold * angularBalanceThreshold;
+    private float BalanceStateLinearVelocityThresholdSqr =>
+        balanceStateLinearVelocityThreshold * balanceStateLinearVelocityThreshold;
+    private float BalanceStateAngularVelocityThresholdSqr =>
+        balanceStateAngularVelocityThreshold * balanceStateAngularVelocityThreshold;
 
     private void Awake()
     {
@@ -79,10 +97,16 @@ public class TotemBlockDetector : MonoBehaviour
 
         supportColliders.Remove(collision.collider);
         IsSupported = supportColliders.Count > 0;
-        isBalanced = false;
+        UpdateBalanceState();
     }
 
     private void UpdateBalanceState()
+    {
+        UpdateLegacyBalanceState();
+        UpdateEnumBalanceState();
+    }
+
+    private void UpdateLegacyBalanceState()
     {
         if (cachedRigidbody == null)
         {
@@ -96,5 +120,24 @@ public class TotemBlockDetector : MonoBehaviour
             cachedRigidbody.angularVelocity.sqrMagnitude <= AngularBalanceThresholdSqr;
 
         isBalanced = IsSupported && isMovingSlowly;
+    }
+
+    private void UpdateEnumBalanceState()
+    {
+        if (cachedRigidbody == null || !IsSupported)
+        {
+            balanceState = TotemBlockBalanceState.Unsupported;
+            return;
+        }
+
+        bool isLinearSlowEnough =
+            cachedRigidbody.linearVelocity.sqrMagnitude <= BalanceStateLinearVelocityThresholdSqr;
+
+        bool isAngularSlowEnough =
+            cachedRigidbody.angularVelocity.sqrMagnitude <= BalanceStateAngularVelocityThresholdSqr;
+
+        balanceState = isLinearSlowEnough && isAngularSlowEnough
+            ? TotemBlockBalanceState.Balanced
+            : TotemBlockBalanceState.Balancing;
     }
 }

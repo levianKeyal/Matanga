@@ -4,6 +4,12 @@ using TMPro;
 
 public class CoreManager : MonoBehaviour
 {
+    private enum BlockBalanceEvaluationMode
+    {
+        LegacyIsBalanced,
+        BalanceState
+    }
+
     [Header("UI Elements")]
     [SerializeField] private RectTransform circle;
     [SerializeField] private RectTransform line;
@@ -48,6 +54,11 @@ public class CoreManager : MonoBehaviour
     [SerializeField] private bool enableSnapshotDebugLogs = true;
     [SerializeField] private bool enableBlockBaseDebugLogs = false;
     [SerializeField] private TowerSnapshotValidator towerSnapshotValidator;
+
+    [Header("Balance Evaluation")]
+    [SerializeField] private BlockBalanceEvaluationMode blockBalanceEvaluationMode =
+        BlockBalanceEvaluationMode.LegacyIsBalanced;
+    [SerializeField] private bool logBalanceEvaluationDifferences;
 
     private bool isAiming;
     private float currentLineLength;
@@ -423,7 +434,7 @@ public class CoreManager : MonoBehaviour
             return;
         }
 
-        if (!currentBlockDetector.IsBalanced)
+        if (!IsBlockReadyToStack(currentBlockDetector))
         {
             balancedTimer = 0f;
             hasSpawnedNextBlock = false;
@@ -459,7 +470,8 @@ public class CoreManager : MonoBehaviour
             return;
         }
 
-        if (towerStackController.Contains(currentBlockDetector) || currentBlockDetector.IsBalanced)
+        if (towerStackController.Contains(currentBlockDetector) ||
+            IsBlockReadyToStack(currentBlockDetector))
         {
             unstackedBlockQuietTimer = 0f;
             return;
@@ -666,6 +678,46 @@ public class CoreManager : MonoBehaviour
 
         return rigidbody.linearVelocity.sqrMagnitude <= CompletelyStillVelocitySqrThreshold &&
                rigidbody.angularVelocity.sqrMagnitude <= CompletelyStillVelocitySqrThreshold;
+    }
+
+    private bool IsBlockReadyToStack(TotemBlockDetector detector)
+    {
+        if (detector == null)
+        {
+            return false;
+        }
+
+        if (logBalanceEvaluationDifferences)
+        {
+            LogBalanceEvaluationDifference(detector);
+        }
+
+        switch (blockBalanceEvaluationMode)
+        {
+            case BlockBalanceEvaluationMode.BalanceState:
+                return detector.BalanceState == TotemBlockBalanceState.Balanced;
+
+            case BlockBalanceEvaluationMode.LegacyIsBalanced:
+            default:
+                return detector.IsBalanced;
+        }
+    }
+
+    private void LogBalanceEvaluationDifference(TotemBlockDetector detector)
+    {
+        bool legacyBalanced = detector.IsBalanced;
+        bool stateBalanced = detector.BalanceState == TotemBlockBalanceState.Balanced;
+
+        if (legacyBalanced == stateBalanced)
+        {
+            return;
+        }
+
+        Debug.Log(
+            $"[BalanceEvaluation] Block='{detector.name}', " +
+            $"LegacyIsBalanced={legacyBalanced}, " +
+            $"BalanceState={detector.BalanceState}, " +
+            $"StateBalanced={stateBalanced}");
     }
 
     private void ResetCurrentBlockRemovalState()
