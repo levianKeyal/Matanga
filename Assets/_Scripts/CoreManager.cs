@@ -247,6 +247,10 @@ public class CoreManager : MonoBehaviour
             currentAimAngle = targetAngle;
             hasAimAngle = true;
         }
+        else if (pointerState.Source == AimInputController.PointerSource.Touch)
+        {
+            currentAimAngle = targetAngle;
+        }
         else
         {
             currentAimAngle = Mathf.LerpAngle(
@@ -255,6 +259,7 @@ public class CoreManager : MonoBehaviour
                 aimDirectionResponse);
         }
 
+        // Length is already applied directly, preserving immediate touch response.
         if (aimVisualController.IsPointerInsideOuterArea(pointerScreen))
         {
             currentLineLength = dir.magnitude * 2f * aimDragSensitivity;
