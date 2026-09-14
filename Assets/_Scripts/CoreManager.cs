@@ -255,20 +255,11 @@ public class CoreManager : MonoBehaviour
 
         if (!hasAimAngle)
         {
-            currentAimAngle = targetAngle;
             hasAimAngle = true;
         }
-        else if (pointerState.Source == AimInputController.PointerSource.Touch)
-        {
-            currentAimAngle = targetAngle;
-        }
-        else
-        {
-            currentAimAngle = Mathf.LerpAngle(
-                currentAimAngle,
-                targetAngle,
-                aimDirectionResponse);
-        }
+
+        // Aim direction now responds immediately for touch, mouse, desktop and WebGL.
+        currentAimAngle = targetAngle;
 
         // Length is already applied directly, preserving immediate touch response.
         if (aimVisualController.IsPointerInsideOuterArea(pointerScreen))

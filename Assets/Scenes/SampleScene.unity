@@ -2208,7 +2208,7 @@ MonoBehaviour:
   blockBaseMover: {fileID: 0}
   towerStackController: {fileID: 0}
   stackedBlocks: []
-  maxLaunchImpulse: 26
+  maxLaunchImpulse: 75
   balancedHoldTime: 1
   apexFallGravityMultiplier: 5
   apexFallBlendTime: 0.35
