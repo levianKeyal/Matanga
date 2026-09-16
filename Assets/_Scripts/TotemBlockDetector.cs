@@ -14,6 +14,7 @@ public class TotemBlockDetector : MonoBehaviour
     private const float SupportRelaxedStillnessMultiplier = 4f;
 
     [SerializeField] private string supportingBlockTag = "TotemBlock";
+    [SerializeField] private string blockBaseTag = "Blockbase";
     [SerializeField, Range(0f, 1f)] private float supportNormalThreshold = 0.5f;
     [SerializeField, Min(0f)] private float linearBalanceThreshold = 0.05f;
     [SerializeField, Min(0f)] private float angularBalanceThreshold = 0.05f;
@@ -31,6 +32,7 @@ public class TotemBlockDetector : MonoBehaviour
 
     private Rigidbody cachedRigidbody;
     private readonly HashSet<Collider> supportColliders = new HashSet<Collider>();
+    private bool hasRequestedBlockBaseCleanup;
 
     private float LinearBalanceThresholdSqr => linearBalanceThreshold * linearBalanceThreshold;
     private float AngularBalanceThresholdSqr => angularBalanceThreshold * angularBalanceThreshold;
@@ -57,8 +59,22 @@ public class TotemBlockDetector : MonoBehaviour
         UpdateBalanceState();
     }
 
+    private void OnCollisionEnter(Collision collision)
+    {
+        if (IsBlockBaseCollider(collision.collider))
+        {
+            NotifyBlockBaseContact();
+        }
+    }
+
     private void OnCollisionStay(Collision collision)
     {
+        if (IsBlockBaseCollider(collision.collider))
+        {
+            NotifyBlockBaseContact();
+            return;
+        }
+
         if (!collision.collider.CompareTag(supportingBlockTag))
         {
             return;
@@ -106,6 +122,30 @@ public class TotemBlockDetector : MonoBehaviour
         supportColliders.Remove(collision.collider);
         IsSupported = supportColliders.Count > 0;
         UpdateBalanceState();
+    }
+
+    private void NotifyBlockBaseContact()
+    {
+        if (hasRequestedBlockBaseCleanup)
+        {
+            return;
+        }
+
+        hasRequestedBlockBaseCleanup = true;
+
+        CoreManager coreManager = FindFirstObjectByType<CoreManager>();
+        if (coreManager != null)
+        {
+            coreManager.RemoveBlockAfterBlockBaseContact(this);
+            return;
+        }
+
+        Destroy(gameObject);
+    }
+
+    private bool IsBlockBaseCollider(Collider other)
+    {
+        return other != null && other.gameObject.tag == blockBaseTag;
     }
 
     private void UpdateBalanceState()

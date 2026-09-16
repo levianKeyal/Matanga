@@ -11,6 +11,12 @@ public class CoreManager : MonoBehaviour
         BalanceState
     }
 
+    private enum BlockSpawnValidationMode
+    {
+        LegacyValidation,
+        ImmediateAfterLaunch
+    }
+
     private enum AimDirectionMode
     {
         RadialDrag,
@@ -95,6 +101,12 @@ public class CoreManager : MonoBehaviour
     [SerializeField, Min(0f)] private float balanceStateLinearVelocityThreshold = 0.08f;
     [SerializeField, Min(0f)] private float balanceStateAngularVelocityThreshold = 0.10f;
 
+    [Header("Block Spawn Validation")]
+    [SerializeField] private BlockSpawnValidationMode blockSpawnValidationMode =
+        BlockSpawnValidationMode.LegacyValidation;
+    [SerializeField, Min(0f)] private float immediateSpawnDelayAfterLaunch = 0.35f;
+    [SerializeField, Min(1)] private int maxImmediatePendingLaunchedBlocks = 3;
+
     private bool isAiming;
     private float currentLineLength;
     private float currentAimAngle;
@@ -115,6 +127,8 @@ public class CoreManager : MonoBehaviour
     private float respawnTimer;
     private bool hasPendingRespawn;
     private bool spawnBlockAfterBaseAnimation;
+    private readonly List<TotemBlockDetector> immediatePendingLaunchedBlocks =
+        new List<TotemBlockDetector>();
     private const float CompletelyStillVelocitySqrThreshold = 0.0001f;
 
     private void Awake()
@@ -258,6 +272,7 @@ public class CoreManager : MonoBehaviour
         UpdatePendingRespawn();
         UpdateBlockBaseAnimation();
         UpdateBalancedBlockState();
+        UpdateImmediatePendingLaunchedBlocksState();
         UpdateUnstackedLaunchedBlockState();
         UpdateTrajectoryPreview();
         if (hasPointerState && pointerState.PressedThisFrame)
@@ -544,6 +559,8 @@ public class CoreManager : MonoBehaviour
         CacheLaunchApexData(launchDirection, launchImpulse);
         blockToLaunch.AddForce(launchDirection * launchImpulse, ForceMode.Impulse);
         hasLaunchedCurrentBlock = true;
+        AddCurrentBlockToImmediatePendingLaunchedBlocks();
+        TryScheduleImmediateSpawnAfterLaunch();
         hasEnteredFallPhase = false;
         fallPhaseTimer = 0f;
         HideHorizontalAimGuideBlock();
@@ -675,6 +692,11 @@ public class CoreManager : MonoBehaviour
 
     private void UpdateBalancedBlockState()
     {
+        if (blockSpawnValidationMode == BlockSpawnValidationMode.ImmediateAfterLaunch)
+        {
+            return;
+        }
+
         if (hasPendingRespawn)
         {
             return;
@@ -786,21 +808,31 @@ public class CoreManager : MonoBehaviour
         }
 
         CleanupInvalidStackedBlocks();
+        CleanupImmediatePendingLaunchedBlocks();
 
         if (towerStackController.PendingDestroyCount > 0)
         {
             return;
         }
 
-        if (!AreStackedBlocksFullySettled())
+        if (blockSpawnValidationMode == BlockSpawnValidationMode.LegacyValidation &&
+            !AreStackedBlocksFullySettled())
         {
             respawnTimer = balancedHoldTime;
             return;
         }
 
+        if (blockSpawnValidationMode == BlockSpawnValidationMode.ImmediateAfterLaunch &&
+            !CanSpawnImmediateModeBlockNow())
+        {
+            return;
+        }
+
         if (respawnTimer <= 0f)
         {
-            respawnTimer = balancedHoldTime;
+            respawnTimer = blockSpawnValidationMode == BlockSpawnValidationMode.ImmediateAfterLaunch
+                ? immediateSpawnDelayAfterLaunch
+                : balancedHoldTime;
         }
 
         respawnTimer -= Time.deltaTime;
@@ -823,8 +855,115 @@ public class CoreManager : MonoBehaviour
 
         if (towerStackController.RegisterBlock(currentBlockDetector))
         {
+            immediatePendingLaunchedBlocks.Remove(currentBlockDetector);
             RefreshStackedBlocksText();
         }
+    }
+
+    private void AddCurrentBlockToImmediatePendingLaunchedBlocks()
+    {
+        if (blockSpawnValidationMode != BlockSpawnValidationMode.ImmediateAfterLaunch ||
+            currentBlockDetector == null)
+        {
+            return;
+        }
+
+        CleanupImmediatePendingLaunchedBlocks();
+
+        if (!immediatePendingLaunchedBlocks.Contains(currentBlockDetector))
+        {
+            immediatePendingLaunchedBlocks.Add(currentBlockDetector);
+        }
+    }
+
+    private void UpdateImmediatePendingLaunchedBlocksState()
+    {
+        if (blockSpawnValidationMode != BlockSpawnValidationMode.ImmediateAfterLaunch)
+        {
+            return;
+        }
+
+        bool registeredBlock = false;
+
+        for (int i = immediatePendingLaunchedBlocks.Count - 1; i >= 0; i--)
+        {
+            TotemBlockDetector detector = immediatePendingLaunchedBlocks[i];
+
+            if (detector == null)
+            {
+                immediatePendingLaunchedBlocks.RemoveAt(i);
+                continue;
+            }
+
+            if (towerStackController.Contains(detector) ||
+                towerStackController.ContainsPendingDestroy(detector))
+            {
+                immediatePendingLaunchedBlocks.RemoveAt(i);
+                continue;
+            }
+
+            if (!IsBlockReadyToStack(detector))
+            {
+                continue;
+            }
+
+            if (towerStackController.RegisterBlock(detector))
+            {
+                immediatePendingLaunchedBlocks.RemoveAt(i);
+                registeredBlock = true;
+            }
+        }
+
+        if (registeredBlock)
+        {
+            RefreshStackedBlocksText();
+            towerSnapshotValidator.CaptureSnapshot(
+                towerStackController.StackedBlocks,
+                GetTowerBaseReferenceTransform());
+            RefreshBlockBasePosition(false);
+        }
+
+        if (!hasPendingRespawn && hasLaunchedCurrentBlock && CanSpawnImmediateModeBlockNow())
+        {
+            StartPendingSpawn(immediateSpawnDelayAfterLaunch);
+        }
+    }
+
+    private void CleanupImmediatePendingLaunchedBlocks()
+    {
+        for (int i = immediatePendingLaunchedBlocks.Count - 1; i >= 0; i--)
+        {
+            TotemBlockDetector detector = immediatePendingLaunchedBlocks[i];
+
+            if (detector == null ||
+                towerStackController.Contains(detector) ||
+                towerStackController.ContainsPendingDestroy(detector))
+            {
+                immediatePendingLaunchedBlocks.RemoveAt(i);
+            }
+        }
+    }
+
+    private void TryScheduleImmediateSpawnAfterLaunch()
+    {
+        if (!CanSpawnImmediateModeBlockNow())
+        {
+            return;
+        }
+
+        StartPendingSpawn(immediateSpawnDelayAfterLaunch);
+    }
+
+    private bool CanSpawnImmediateModeBlockNow()
+    {
+        if (blockSpawnValidationMode != BlockSpawnValidationMode.ImmediateAfterLaunch)
+        {
+            return false;
+        }
+
+        CleanupImmediatePendingLaunchedBlocks();
+
+        return immediatePendingLaunchedBlocks.Count < Mathf.Max(1, maxImmediatePendingLaunchedBlocks);
     }
 
     // Queue or remove fallen blocks while preserving the one-at-a-time cleanup flow.
@@ -1059,6 +1198,33 @@ public class CoreManager : MonoBehaviour
         hasSpawnedNextBlock = false;
     }
 
+    public void SetLegacySpawnValidationMode()
+    {
+        blockSpawnValidationMode = BlockSpawnValidationMode.LegacyValidation;
+        ApplyBlockSpawnValidationMode();
+    }
+
+    public void SetImmediateAfterLaunchSpawnValidationMode()
+    {
+        blockSpawnValidationMode = BlockSpawnValidationMode.ImmediateAfterLaunch;
+        ApplyBlockSpawnValidationMode();
+    }
+
+    public void ToggleBlockSpawnValidationMode()
+    {
+        blockSpawnValidationMode =
+            blockSpawnValidationMode == BlockSpawnValidationMode.LegacyValidation
+                ? BlockSpawnValidationMode.ImmediateAfterLaunch
+                : BlockSpawnValidationMode.LegacyValidation;
+
+        ApplyBlockSpawnValidationMode();
+    }
+
+    private void ApplyBlockSpawnValidationMode()
+    {
+        CleanupImmediatePendingLaunchedBlocks();
+    }
+
     public void RemoveStackedBlock(TotemBlockDetector blockDetector)
     {
         if (blockDetector == null)
@@ -1066,38 +1232,69 @@ public class CoreManager : MonoBehaviour
             return;
         }
 
-        bool wasCurrentControlledBlock = false;
+        RemoveBlockFromAllRuntimeTracking(blockDetector, true);
+    }
 
-        if (towerStackController.RemoveBlock(blockDetector))
+    public void RemoveBlockAfterBlockBaseContact(TotemBlockDetector blockDetector)
+    {
+        if (blockDetector == null)
+        {
+            return;
+        }
+
+        RemoveBlockFromAllRuntimeTracking(blockDetector, true);
+
+        if (blockDetector.gameObject != null)
+        {
+            Destroy(blockDetector.gameObject);
+        }
+    }
+
+    private void RemoveBlockFromAllRuntimeTracking(
+        TotemBlockDetector blockDetector,
+        bool refreshBlockBasePosition)
+    {
+        if (blockDetector == null)
+        {
+            return;
+        }
+
+        immediatePendingLaunchedBlocks.Remove(blockDetector);
+
+        bool removedFromStack = towerStackController.RemoveBlock(blockDetector);
+        towerStackController.RemovePendingDestroy(blockDetector);
+
+        if (removedFromStack)
         {
             RefreshStackedBlocksText();
-            RefreshBlockBasePosition(false);
+
+            if (refreshBlockBasePosition)
+            {
+                RefreshBlockBasePosition(false);
+            }
+        }
+
+        if (IsCurrentControlledBlock(blockDetector))
+        {
+            ResetCurrentBlockRemovalState();
+        }
+    }
+
+    private bool IsCurrentControlledBlock(TotemBlockDetector blockDetector)
+    {
+        if (blockDetector == null)
+        {
+            return false;
         }
 
         if (currentBlockDetector == blockDetector)
         {
-            wasCurrentControlledBlock = true;
+            return true;
         }
 
-        if (blockToLaunch != null && blockDetector.TryGetComponent<Rigidbody>(out Rigidbody detectorRigidbody))
-        {
-            if (blockToLaunch == detectorRigidbody)
-            {
-                wasCurrentControlledBlock = true;
-            }
-        }
-
-        if (wasCurrentControlledBlock)
-        {
-            ResetCurrentBlockReferences();
-            ResetAimState();
-            ResetLaunchState();
-            ResetRespawnState();
-            ResetCurrentBlockRuntimeState();
-
-            hasPendingRespawn = true;
-            respawnTimer = balancedHoldTime;
-        }
+        return blockToLaunch != null &&
+               blockDetector.TryGetComponent<Rigidbody>(out Rigidbody detectorRigidbody) &&
+               blockToLaunch == detectorRigidbody;
     }
 
     private void RefreshBlockBasePosition(bool spawnAfterAnimation)
