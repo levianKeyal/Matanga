@@ -1,6 +1,7 @@
 using UnityEngine;
 using System.Collections.Generic;
 using TMPro;
+using UnityEngine.Serialization;
 
 public class CoreManager : MonoBehaviour
 {
@@ -8,6 +9,18 @@ public class CoreManager : MonoBehaviour
     {
         LegacyIsBalanced,
         BalanceState
+    }
+
+    private enum AimDirectionMode
+    {
+        RadialDrag,
+        HorizontalReferenceBar
+    }
+
+    private enum HorizontalReferencePowerMode
+    {
+        RadialDistanceFromCenter,
+        VerticalReferenceRect
     }
 
     [Header("UI Elements")]
@@ -27,6 +40,22 @@ public class CoreManager : MonoBehaviour
     [SerializeField] private AimVisualController aimVisualController;
     [SerializeField] private AimInputController aimInputController;
 
+    [Header("Aim Direction Mode")]
+    [SerializeField] private AimDirectionMode aimDirectionMode = AimDirectionMode.RadialDrag;
+    [SerializeField, HideInInspector] private AimDirectionMode lastAppliedAimDirectionMode;
+    [SerializeField, HideInInspector] private bool hasAppliedAimDirectionMode;
+    [SerializeField] private RectTransform horizontalAimReference;
+    [SerializeField, Range(0f, 180f)] private float maxHorizontalAimAngle = 180f;
+    [SerializeField, Min(0.01f)] private float horizontalAimReferenceWidthMultiplier = 1f;
+    [SerializeField] private HorizontalReferencePowerMode horizontalReferencePowerMode =
+        HorizontalReferencePowerMode.RadialDistanceFromCenter;
+    [SerializeField] private RectTransform verticalPowerReference;
+
+    [Header("Radial Aim Stability")]
+    [SerializeField] private bool useRadialAimAngleDeadZone = false;
+    [SerializeField, Min(0f)] private float radialAimMinAngleDeadZone = 0.25f;
+    [SerializeField, Min(0f)] private float radialAimMaxAngleDeadZone = 2f;
+
     [SerializeField] private TMP_Text stackedBlocksText;
 
     [Header("Stacking Elements")]
@@ -40,7 +69,9 @@ public class CoreManager : MonoBehaviour
     [SerializeField] private List<TotemBlockDetector> stackedBlocks = new List<TotemBlockDetector>();
 
     [Header("Stacking Settings")]
-    [SerializeField] private float maxLaunchImpulse = 12f;
+    [SerializeField, Min(0f), FormerlySerializedAs("maxLaunchImpulse")]
+    private float radialDragMaxLaunchImpulse = 12f;
+    [SerializeField, Min(0f)] private float horizontalReferenceMaxLaunchImpulse = 12f;
     [SerializeField, Min(0f)] private float balancedHoldTime = 0.5f;
     [SerializeField, Min(1f)] private float apexFallGravityMultiplier = 3.5f;
     [SerializeField, Min(0f)] private float apexFallBlendTime = 0.12f;
@@ -111,6 +142,8 @@ public class CoreManager : MonoBehaviour
             enabled = false;
             return;
         }
+
+        ApplyAimDirectionModeIfChanged(true);
 
         if (aimInputController == null)
         {
@@ -206,10 +239,16 @@ public class CoreManager : MonoBehaviour
 
         if (hasPointerState && pointerState.ReleasedThisFrame)
         {
-            LaunchBlock();
-            isAiming = false;
-            aimInputController.ClearActivePointerSource();
-            aimVisualController.HideAimLine();
+            if (isAiming && !LaunchBlock())
+            {
+                CancelAimWithoutLaunch();
+            }
+            else
+            {
+                isAiming = false;
+                aimInputController.ClearActivePointerSource();
+                aimVisualController.HideAimLine();
+            }
         }
 
         UpdatePendingRespawn();
@@ -219,13 +258,14 @@ public class CoreManager : MonoBehaviour
         UpdateTrajectoryPreview();
         if (hasPointerState && pointerState.PressedThisFrame)
         {
-            if (!hasUsedAimForCurrentBlock && !hasLaunchedCurrentBlock && IsPointerInsideAimArea(pointerState.ScreenPosition))
+            if (!hasUsedAimForCurrentBlock && !hasLaunchedCurrentBlock && CanStartAim(pointerState.ScreenPosition))
             {
                 isAiming = true;
                 hasUsedAimForCurrentBlock = true;
                 hasAimAngle = false;
                 aimInputController.SetActivePointerSource(pointerState.Source);
 
+                BeginHorizontalAimGuideDrag();
                 aimVisualController.ShowAimLine();
                 currentLineLength = 0f;
                 aimVisualController.ResetAimLineLength();
@@ -251,25 +291,224 @@ public class CoreManager : MonoBehaviour
 
         Vector2 center = aimVisualController.GetAimCenter();
         Vector2 dir = pointerLocal - center;
-        float targetAngle = Mathf.Atan2(-dir.y, -dir.x) * Mathf.Rad2Deg;
+        float targetAngle = CalculateTargetAimAngle(pointerScreen, dir);
 
         if (!hasAimAngle)
         {
             hasAimAngle = true;
+            currentAimAngle = targetAngle;
         }
-
-        // Aim direction now responds immediately for touch, mouse, desktop and WebGL.
-        currentAimAngle = targetAngle;
+        else if (aimDirectionMode == AimDirectionMode.RadialDrag)
+        {
+            if (ShouldUpdateRadialAimAngle(dir, targetAngle))
+            {
+                currentAimAngle = targetAngle;
+            }
+        }
+        else
+        {
+            // Non-radial aim modes stay immediate for touch, mouse, desktop and WebGL.
+            currentAimAngle = targetAngle;
+        }
 
         // Length is already applied directly, preserving immediate touch response.
-        if (aimVisualController.IsPointerInsideOuterArea(pointerScreen))
+        if (ShouldUpdateAimLineLength(pointerScreen))
         {
-            currentLineLength = dir.magnitude * 2f * aimDragSensitivity;
+            float maxLineLength = GetAimReferenceLength();
+            currentLineLength = CalculateCurrentLineLength(pointerScreen, dir, maxLineLength);
         }
 
+        UpdateHorizontalAimGuideDuringDrag(pointerScreen);
         aimVisualController.UpdateAimLine(currentAimAngle, currentLineLength);
 
         UpdateTrajectoryPreview();
+    }
+
+    private float CalculateTargetAimAngle(Vector2 pointerScreen, Vector2 radialDirection)
+    {
+        switch (aimDirectionMode)
+        {
+            case AimDirectionMode.HorizontalReferenceBar:
+                return CalculateHorizontalReferenceAimAngle(pointerScreen, radialDirection);
+
+            case AimDirectionMode.RadialDrag:
+            default:
+                return CalculateRadialAimAngle(radialDirection);
+        }
+    }
+
+    private float CalculateHorizontalReferenceAimAngle(
+        Vector2 pointerScreen,
+        Vector2 fallbackRadialDirection)
+    {
+        if (!TryGetClampedHorizontalReferenceLocalPointer(
+                pointerScreen,
+                out Vector2 clampedLocalPointer))
+        {
+            return CalculateRadialAimAngle(fallbackRadialDirection);
+        }
+
+        float halfWidth = horizontalAimReference.rect.width * 0.5f;
+        halfWidth *= horizontalAimReferenceWidthMultiplier;
+
+        if (halfWidth <= Mathf.Epsilon)
+        {
+            return CalculateRadialAimAngle(fallbackRadialDirection);
+        }
+
+        float normalizedX = Mathf.Clamp(clampedLocalPointer.x / halfWidth, -1f, 1f);
+        return 90f + normalizedX * maxHorizontalAimAngle;
+    }
+
+    private float CalculateCurrentLineLength(
+        Vector2 pointerScreen,
+        Vector2 radialDirection,
+        float maxLineLength)
+    {
+        if (aimDirectionMode == AimDirectionMode.HorizontalReferenceBar &&
+            horizontalReferencePowerMode == HorizontalReferencePowerMode.VerticalReferenceRect)
+        {
+            return CalculateVerticalReferenceLineLength(
+                pointerScreen,
+                radialDirection,
+                maxLineLength);
+        }
+
+        return radialDirection.magnitude * 2f * aimDragSensitivity;
+    }
+
+    private bool ShouldUpdateAimLineLength(Vector2 pointerScreen)
+    {
+        if (aimDirectionMode == AimDirectionMode.HorizontalReferenceBar &&
+            horizontalReferencePowerMode == HorizontalReferencePowerMode.VerticalReferenceRect)
+        {
+            return true;
+        }
+
+        return aimVisualController.IsPointerInsideOuterArea(pointerScreen);
+    }
+
+    private float CalculateVerticalReferenceLineLength(
+        Vector2 pointerScreen,
+        Vector2 fallbackRadialDirection,
+        float maxLineLength)
+    {
+        RectTransform reference = verticalPowerReference != null
+            ? verticalPowerReference
+            : horizontalAimReference;
+
+        if (reference == null || aimVisualController == null)
+        {
+            return fallbackRadialDirection.magnitude * 2f * aimDragSensitivity;
+        }
+
+        if (!TryGetClampedLocalPointerInReference(
+                reference,
+                pointerScreen,
+                out Vector2 clampedLocalPointer))
+        {
+            return fallbackRadialDirection.magnitude * 2f * aimDragSensitivity;
+        }
+
+        float height = reference.rect.height;
+        if (height <= Mathf.Epsilon)
+        {
+            return fallbackRadialDirection.magnitude * 2f * aimDragSensitivity;
+        }
+
+        float topY = height * 0.5f;
+        float bottomY = -height * 0.5f;
+        float power01 = Mathf.InverseLerp(topY, bottomY, clampedLocalPointer.y);
+
+        return Mathf.Clamp01(power01) * maxLineLength;
+    }
+
+    private bool TryGetClampedHorizontalReferenceLocalPointer(
+        Vector2 pointerScreen,
+        out Vector2 clampedLocalPointer)
+    {
+        return TryGetClampedLocalPointerInReference(
+            horizontalAimReference,
+            pointerScreen,
+            out clampedLocalPointer);
+    }
+
+    private bool TryGetClampedLocalPointerInReference(
+        RectTransform reference,
+        Vector2 pointerScreen,
+        out Vector2 clampedLocalPointer)
+    {
+        clampedLocalPointer = Vector2.zero;
+
+        if (reference == null || aimVisualController == null)
+        {
+            return false;
+        }
+
+        if (!RectTransformUtility.ScreenPointToLocalPointInRectangle(
+                reference,
+                pointerScreen,
+                aimVisualController.GetUiCamera(),
+                out Vector2 localPointer))
+        {
+            return false;
+        }
+
+        Rect rect = reference.rect;
+        clampedLocalPointer = new Vector2(
+            Mathf.Clamp(localPointer.x, rect.xMin, rect.xMax),
+            Mathf.Clamp(localPointer.y, rect.yMin, rect.yMax));
+
+        return true;
+    }
+
+    private static float CalculateRadialAimAngle(Vector2 radialDirection)
+    {
+        return Mathf.Atan2(-radialDirection.y, -radialDirection.x) * Mathf.Rad2Deg;
+    }
+
+    private bool ShouldUpdateRadialAimAngle(Vector2 radialDirection, float targetAngle)
+    {
+        if (!useRadialAimAngleDeadZone || !hasAimAngle)
+        {
+            return true;
+        }
+
+        float angleDelta = Mathf.Abs(Mathf.DeltaAngle(currentAimAngle, targetAngle));
+        float maxLineLength = GetAimReferenceLength();
+        float targetLineLength = radialDirection.magnitude * 2f * aimDragSensitivity;
+        float dragStrength = maxLineLength > Mathf.Epsilon
+            ? Mathf.Clamp01(targetLineLength / maxLineLength)
+            : 1f;
+
+        float minDeadZone = Mathf.Min(radialAimMinAngleDeadZone, radialAimMaxAngleDeadZone);
+        float maxDeadZone = Mathf.Max(radialAimMinAngleDeadZone, radialAimMaxAngleDeadZone);
+        float currentDeadZone = Mathf.Lerp(maxDeadZone, minDeadZone, dragStrength);
+
+        return angleDelta >= currentDeadZone;
+    }
+
+    private float GetAimReferenceLength()
+    {
+        if (aimVisualController != null)
+        {
+            return aimVisualController.GetMaxAimLineLength();
+        }
+
+        return 1f;
+    }
+
+    private float GetActiveMaxLaunchImpulse()
+    {
+        switch (aimDirectionMode)
+        {
+            case AimDirectionMode.HorizontalReferenceBar:
+                return horizontalReferenceMaxLaunchImpulse;
+
+            case AimDirectionMode.RadialDrag:
+            default:
+                return radialDragMaxLaunchImpulse;
+        }
     }
 
     private void FixedUpdate()
@@ -277,11 +516,21 @@ public class CoreManager : MonoBehaviour
         UpdateLaunchFallBehavior();
     }
 
-    private void LaunchBlock()
+    private void OnValidate()
+    {
+        ApplyAimDirectionModeIfChanged();
+    }
+
+    public void ApplySelectedAimDirectionModeFromEditor()
+    {
+        ApplyAimDirectionModeIfChanged(true);
+    }
+
+    private bool LaunchBlock()
     {
         if (!TryGetLaunchParameters(out Vector3 launchDirection, out float launchImpulse))
         {
-            return;
+            return false;
         }
 
         blockToLaunch.linearVelocity = Vector3.zero;
@@ -293,8 +542,23 @@ public class CoreManager : MonoBehaviour
         hasLaunchedCurrentBlock = true;
         hasEnteredFallPhase = false;
         fallPhaseTimer = 0f;
+        HideHorizontalAimGuideBlock();
         trajectoryPreview.HidePreview();
         hasAimAngle = false;
+        return true;
+    }
+
+    private void CancelAimWithoutLaunch()
+    {
+        isAiming = false;
+        hasAimAngle = false;
+        currentLineLength = 0f;
+        hasUsedAimForCurrentBlock = false;
+
+        aimInputController.ClearActivePointerSource();
+        aimVisualController.HideAimLine();
+        trajectoryPreview.HidePreview();
+        ReturnHorizontalAimGuideBlockToCenter();
     }
 
     private bool TryGetLaunchParameters(out Vector3 launchDirection, out float launchImpulse)
@@ -326,11 +590,12 @@ public class CoreManager : MonoBehaviour
             return false;
         }
 
-        float maxLineLength = aimVisualController.GetMaxAimLineLength();
+        float maxLineLength = GetAimReferenceLength();
         float forceMultiplier = Mathf.Clamp01(currentLineLength / maxLineLength);
+        float activeMaxLaunchImpulse = GetActiveMaxLaunchImpulse();
 
         launchDirection = new Vector3(launchDirection2D.x, launchDirection2D.y, 0f);
-        launchImpulse = forceMultiplier * maxLaunchImpulse;
+        launchImpulse = forceMultiplier * activeMaxLaunchImpulse;
         return true;
     }
 
@@ -397,6 +662,7 @@ public class CoreManager : MonoBehaviour
         ResetAimState();
         ResetLaunchState();
         ResetRespawnState();
+        RefreshHorizontalAimGuideBlockForReadyBlock();
     }
 
     private void UpdateBalancedBlockState()
@@ -1001,6 +1267,200 @@ public class CoreManager : MonoBehaviour
     private bool IsPointerInsideAimArea(Vector2 pointerScreen)
     {
         return aimVisualController.IsPointerInsideAimArea(pointerScreen);
+    }
+
+    private bool CanStartAim(Vector2 pointerScreen)
+    {
+        bool insideAimArea = aimVisualController != null &&
+                             aimVisualController.IsPointerInsideAimArea(pointerScreen);
+
+        if (aimDirectionMode != AimDirectionMode.HorizontalReferenceBar)
+        {
+            return insideAimArea;
+        }
+
+        bool insideGuideBlock = aimVisualController != null &&
+                                aimVisualController.IsPointerInsideAimGuideBlock(pointerScreen);
+
+        return insideAimArea || insideGuideBlock;
+    }
+
+    private bool ShouldUseHorizontalAimGuideBlock()
+    {
+        return aimDirectionMode == AimDirectionMode.HorizontalReferenceBar &&
+               aimVisualController != null &&
+               aimVisualController.HasAimGuideBlock;
+    }
+
+    private void RefreshHorizontalAimGuideBlockForReadyBlock()
+    {
+        if (ShouldUseHorizontalAimGuideBlock() && blockToLaunch != null && !hasLaunchedCurrentBlock)
+        {
+            aimVisualController.SetUseAimGuideBlockAsLineOrigin(true);
+            aimVisualController.ResetAimGuideBlockImmediate(GetHorizontalAimGuideIdlePosition());
+            aimVisualController.ShowAimGuideBlock();
+            return;
+        }
+
+        if (aimVisualController == null)
+        {
+            return;
+        }
+
+        aimVisualController.SetUseAimGuideBlockAsLineOrigin(false);
+        if (aimDirectionMode == AimDirectionMode.HorizontalReferenceBar)
+        {
+            aimVisualController.HideAimGuideBlockIfNoBlockReady();
+            return;
+        }
+
+        aimVisualController.HideAimGuideBlock();
+    }
+
+    private void ApplyAimDirectionModeIfChanged(bool force = false)
+    {
+        if (!force &&
+            hasAppliedAimDirectionMode &&
+            lastAppliedAimDirectionMode == aimDirectionMode)
+        {
+            return;
+        }
+
+        lastAppliedAimDirectionMode = aimDirectionMode;
+        hasAppliedAimDirectionMode = true;
+
+        ApplyAimDirectionMode();
+    }
+
+    private void ApplyAimDirectionMode()
+    {
+        bool useHorizontalMode = aimDirectionMode == AimDirectionMode.HorizontalReferenceBar;
+
+        if (circle != null)
+        {
+            circle.gameObject.SetActive(!useHorizontalMode);
+        }
+
+        if (horizontalAimReference != null)
+        {
+            horizontalAimReference.gameObject.SetActive(useHorizontalMode);
+        }
+
+        if (aimVisualController != null)
+        {
+            aimVisualController.SetUseAimGuideBlockAsLineOrigin(useHorizontalMode);
+
+            if (useHorizontalMode)
+            {
+                RefreshHorizontalAimGuideBlockForReadyBlock();
+            }
+            else
+            {
+                aimVisualController.HideAimGuideBlock();
+                aimVisualController.SetUseAimGuideBlockAsLineOrigin(false);
+            }
+        }
+
+        CancelAimStateAfterModeChange();
+    }
+
+    private void CancelAimStateAfterModeChange()
+    {
+        if (!Application.isPlaying)
+        {
+            return;
+        }
+
+        isAiming = false;
+        currentLineLength = 0f;
+        hasAimAngle = false;
+        hasUsedAimForCurrentBlock = false;
+
+        if (aimInputController != null)
+        {
+            aimInputController.ClearActivePointerSource();
+        }
+
+        if (aimVisualController != null)
+        {
+            aimVisualController.HideAimLine();
+            aimVisualController.ResetAimLineLength();
+        }
+
+        if (trajectoryPreview != null)
+        {
+            trajectoryPreview.HidePreview();
+        }
+    }
+
+    private void BeginHorizontalAimGuideDrag()
+    {
+        if (!ShouldUseHorizontalAimGuideBlock())
+        {
+            if (aimVisualController != null)
+            {
+                aimVisualController.SetUseAimGuideBlockAsLineOrigin(false);
+            }
+
+            return;
+        }
+
+        aimVisualController.StopAimGuideBlockReturn();
+        aimVisualController.ShowAimGuideBlock();
+        aimVisualController.SetUseAimGuideBlockAsLineOrigin(true);
+    }
+
+    private void UpdateHorizontalAimGuideDuringDrag(Vector2 pointerScreen)
+    {
+        if (!ShouldUseHorizontalAimGuideBlock())
+        {
+            return;
+        }
+
+        if (!TryGetAimGuideLocalPosition(pointerScreen, out Vector2 guideLocalPosition))
+        {
+            return;
+        }
+
+        aimVisualController.SetAimGuideBlockPosition(guideLocalPosition);
+        aimVisualController.SetAimGuideBlockRotation(currentAimAngle);
+    }
+
+    private void HideHorizontalAimGuideBlock()
+    {
+        if (!ShouldUseHorizontalAimGuideBlock())
+        {
+            return;
+        }
+
+        aimVisualController.HideAimGuideBlock();
+    }
+
+    private void ReturnHorizontalAimGuideBlockToCenter()
+    {
+        if (!ShouldUseHorizontalAimGuideBlock())
+        {
+            return;
+        }
+
+        aimVisualController.ReturnAimGuideBlockToCenter(GetHorizontalAimGuideIdlePosition());
+    }
+
+    private Vector2 GetHorizontalAimGuideIdlePosition()
+    {
+        if (aimVisualController == null)
+        {
+            return Vector2.zero;
+        }
+
+        return aimVisualController.GetAimGuideBlockIdlePosition(horizontalAimReference);
+    }
+
+    private bool TryGetAimGuideLocalPosition(Vector2 pointerScreen, out Vector2 guideLocalPosition)
+    {
+        return TryGetClampedHorizontalReferenceLocalPointer(
+            pointerScreen,
+            out guideLocalPosition);
     }
 
 }

@@ -3,6 +3,12 @@ using UnityEngine.UI;
 
 public class AimVisualController : MonoBehaviour
 {
+    [Header("Horizontal Reference Aim Guide Block")]
+    [SerializeField] private RectTransform aimGuideBlock;
+    [SerializeField] private bool useAimGuideBlock = true;
+    [SerializeField] private float aimGuideReturnSmoothTime = 0.12f;
+    [SerializeField] private bool hideAimGuideBlockWhenNoBlockReady = true;
+
     private RectTransform circle;
     private RectTransform line;
     private RectTransform outerAreaCircle;
@@ -11,6 +17,19 @@ public class AimVisualController : MonoBehaviour
     private Image lineGraphicImage;
     private float lineGraphicHeight;
     private Color lineGraphicColor;
+    private Transform originalAimLineParent;
+    private int originalAimLineSiblingIndex;
+    private bool useAimGuideBlockAsLineOrigin;
+    private bool isReturningAimGuideBlock;
+    private Quaternion aimGuideBlockBaseLocalRotation = Quaternion.identity;
+    private bool hasAimGuideBlockBaseRotation;
+    private Vector2 aimGuideReturnVelocity;
+    private Vector2 aimGuideTargetPosition;
+
+    public bool HasAimGuideBlock => useAimGuideBlock && aimGuideBlock != null;
+
+    public Vector2 AimGuideBlockPosition =>
+        aimGuideBlock != null ? aimGuideBlock.anchoredPosition : Vector2.zero;
 
     public bool Initialize(
         RectTransform circleReference,
@@ -37,6 +56,8 @@ public class AimVisualController : MonoBehaviour
         line.anchorMax = new Vector2(0.5f, 0.5f);
         line.pivot = new Vector2(0.5f, 0.5f);
         line.anchoredPosition = Vector2.zero;
+        originalAimLineParent = line.parent;
+        originalAimLineSiblingIndex = line.GetSiblingIndex();
 
         Image rootImage = line.GetComponent<Image>();
         if (rootImage != null)
@@ -45,7 +66,13 @@ public class AimVisualController : MonoBehaviour
         }
 
         EnsureLineGraphic();
+        ConfigureAimGuideBlock();
         return lineGraphic != null && lineGraphicImage != null;
+    }
+
+    private void Update()
+    {
+        UpdateAimGuideBlockReturn();
     }
 
     public Camera GetUiCamera()
@@ -115,8 +142,21 @@ public class AimVisualController : MonoBehaviour
         }
 
         Vector2 size = lineGraphic.sizeDelta;
-        size.x = 0f;
+        if (useAimGuideBlockAsLineOrigin && HasAimGuideBlock)
+        {
+            line.sizeDelta = new Vector2(lineGraphicHeight, 0f);
+        }
+        else
+        {
+            size.x = 0f;
+        }
+
         lineGraphic.sizeDelta = size;
+    }
+
+    public void SetUseAimGuideBlockAsLineOrigin(bool useGuideBlockOrigin)
+    {
+        useAimGuideBlockAsLineOrigin = useGuideBlockOrigin;
     }
 
     public void UpdateAimLine(float angle, float length)
@@ -126,14 +166,131 @@ public class AimVisualController : MonoBehaviour
             return;
         }
 
-        line.anchoredPosition = Vector2.zero;
-        line.localRotation = Quaternion.Euler(0f, 0f, angle);
+        if (useAimGuideBlockAsLineOrigin && HasAimGuideBlock)
+        {
+            UpdateAimLineFromGuideBlock(length);
+        }
+        else
+        {
+            UpdateAimLineFromCircle(angle, length);
+        }
 
-        lineGraphic.anchoredPosition = Vector2.zero;
-        lineGraphic.localRotation = Quaternion.identity;
-        lineGraphicHeight = Mathf.Clamp(lineGraphicHeight, 2f, 10f);
-        lineGraphic.sizeDelta = new Vector2(length, lineGraphicHeight);
         lineGraphicImage.color = lineGraphicColor;
+    }
+
+    public void ShowAimGuideBlock()
+    {
+        if (!HasAimGuideBlock)
+        {
+            return;
+        }
+
+        aimGuideBlock.gameObject.SetActive(true);
+    }
+
+    public void HideAimGuideBlock()
+    {
+        if (aimGuideBlock == null)
+        {
+            return;
+        }
+
+        aimGuideBlock.gameObject.SetActive(false);
+        isReturningAimGuideBlock = false;
+        aimGuideReturnVelocity = Vector2.zero;
+    }
+
+    public void SetAimGuideBlockPosition(Vector2 localPosition)
+    {
+        if (!HasAimGuideBlock)
+        {
+            return;
+        }
+
+        isReturningAimGuideBlock = false;
+        aimGuideReturnVelocity = Vector2.zero;
+        aimGuideBlock.anchoredPosition = localPosition;
+        aimGuideBlock.gameObject.SetActive(true);
+    }
+
+    public void SetAimGuideBlockRotation(float aimAngle)
+    {
+        if (!HasAimGuideBlock)
+        {
+            return;
+        }
+
+        CacheAimGuideBlockBaseRotation();
+        float visualAimAngle = aimAngle - 90f;
+        Quaternion aimOffsetRotation = Quaternion.Euler(0f, 0f, visualAimAngle);
+        aimGuideBlock.localRotation = aimGuideBlockBaseLocalRotation * aimOffsetRotation;
+    }
+
+    public void ResetAimGuideBlockImmediate(Vector2 center)
+    {
+        if (!HasAimGuideBlock)
+        {
+            return;
+        }
+
+        isReturningAimGuideBlock = false;
+        aimGuideReturnVelocity = Vector2.zero;
+        aimGuideBlock.anchoredPosition = center;
+        CacheAimGuideBlockBaseRotation();
+        aimGuideBlock.localRotation = aimGuideBlockBaseLocalRotation;
+        aimGuideBlock.gameObject.SetActive(true);
+    }
+
+    public void ReturnAimGuideBlockToCenter(Vector2 center)
+    {
+        if (!HasAimGuideBlock)
+        {
+            return;
+        }
+
+        aimGuideTargetPosition = center;
+        aimGuideReturnVelocity = Vector2.zero;
+        isReturningAimGuideBlock = true;
+        CacheAimGuideBlockBaseRotation();
+        aimGuideBlock.localRotation = aimGuideBlockBaseLocalRotation;
+        aimGuideBlock.gameObject.SetActive(true);
+    }
+
+    public void StopAimGuideBlockReturn()
+    {
+        isReturningAimGuideBlock = false;
+        aimGuideReturnVelocity = Vector2.zero;
+    }
+
+    public bool IsPointerInsideAimGuideBlock(Vector2 screenPosition)
+    {
+        if (!HasAimGuideBlock || !aimGuideBlock.gameObject.activeInHierarchy)
+        {
+            return false;
+        }
+
+        return RectTransformUtility.RectangleContainsScreenPoint(
+            aimGuideBlock,
+            screenPosition,
+            GetUiCamera());
+    }
+
+    public void HideAimGuideBlockIfNoBlockReady()
+    {
+        if (hideAimGuideBlockWhenNoBlockReady)
+        {
+            HideAimGuideBlock();
+        }
+    }
+
+    public Vector2 GetAimGuideBlockIdlePosition(RectTransform referenceRect)
+    {
+        if (referenceRect == null)
+        {
+            return GetAimCenter();
+        }
+
+        return new Vector2(0f, referenceRect.rect.height * 0.5f);
     }
 
     private bool IsPointerInsideCircle(Vector2 pointerScreen, Camera uiCamera)
@@ -207,6 +364,127 @@ public class AimVisualController : MonoBehaviour
         lineGraphicImage.sprite = CreateWhiteSprite();
         lineGraphicImage.color = lineGraphicColor;
         lineGraphicImage.enabled = false;
+    }
+
+    private void ConfigureAimGuideBlock()
+    {
+        if (aimGuideBlock == null)
+        {
+            return;
+        }
+
+        CacheAimGuideBlockBaseRotation();
+        aimGuideBlock.anchorMin = new Vector2(0.5f, 0.5f);
+        aimGuideBlock.anchorMax = new Vector2(0.5f, 0.5f);
+        aimGuideBlock.anchoredPosition = Vector2.zero;
+        aimGuideBlock.localScale = Vector3.one;
+
+        Image guideImage = aimGuideBlock.GetComponent<Image>();
+        if (guideImage != null)
+        {
+            guideImage.raycastTarget = false;
+        }
+
+        if (hideAimGuideBlockWhenNoBlockReady)
+        {
+            aimGuideBlock.gameObject.SetActive(false);
+        }
+    }
+
+    private void UpdateAimGuideBlockReturn()
+    {
+        if (!isReturningAimGuideBlock || aimGuideBlock == null)
+        {
+            return;
+        }
+
+        aimGuideBlock.anchoredPosition = Vector2.SmoothDamp(
+            aimGuideBlock.anchoredPosition,
+            aimGuideTargetPosition,
+            ref aimGuideReturnVelocity,
+            aimGuideReturnSmoothTime);
+
+        if ((aimGuideBlock.anchoredPosition - aimGuideTargetPosition).sqrMagnitude <= 0.01f)
+        {
+            aimGuideBlock.anchoredPosition = aimGuideTargetPosition;
+            isReturningAimGuideBlock = false;
+            aimGuideReturnVelocity = Vector2.zero;
+        }
+    }
+
+    private void UpdateAimLineFromCircle(float angle, float length)
+    {
+        RestoreAimLineParent();
+
+        line.anchorMin = new Vector2(0.5f, 0.5f);
+        line.anchorMax = new Vector2(0.5f, 0.5f);
+        line.pivot = new Vector2(0.5f, 0.5f);
+        line.anchoredPosition = Vector2.zero;
+        line.localRotation = Quaternion.Euler(0f, 0f, angle);
+        line.localScale = Vector3.one;
+
+        lineGraphic.anchorMin = new Vector2(0.5f, 0.5f);
+        lineGraphic.anchorMax = new Vector2(0.5f, 0.5f);
+        lineGraphic.pivot = new Vector2(0f, 0.5f);
+        lineGraphic.anchoredPosition = Vector2.zero;
+        lineGraphic.localRotation = Quaternion.identity;
+        lineGraphic.localScale = Vector3.one;
+        lineGraphicHeight = Mathf.Clamp(lineGraphicHeight, 2f, 10f);
+        lineGraphic.sizeDelta = new Vector2(length, lineGraphicHeight);
+    }
+
+    private void UpdateAimLineFromGuideBlock(float length)
+    {
+        if (aimGuideBlock == null)
+        {
+            return;
+        }
+
+        if (line.parent != aimGuideBlock)
+        {
+            line.SetParent(aimGuideBlock, false);
+        }
+
+        line.anchorMin = new Vector2(0.5f, 1f);
+        line.anchorMax = new Vector2(0.5f, 1f);
+        line.pivot = new Vector2(0.5f, 0f);
+        line.anchoredPosition = Vector2.zero;
+        line.localRotation = Quaternion.identity;
+        line.localScale = Vector3.one;
+        lineGraphicHeight = Mathf.Clamp(lineGraphicHeight, 2f, 10f);
+        line.sizeDelta = new Vector2(lineGraphicHeight, length);
+
+        lineGraphic.anchorMin = Vector2.zero;
+        lineGraphic.anchorMax = Vector2.one;
+        lineGraphic.pivot = new Vector2(0.5f, 0f);
+        lineGraphic.anchoredPosition = Vector2.zero;
+        lineGraphic.localRotation = Quaternion.identity;
+        lineGraphic.localScale = Vector3.one;
+        lineGraphic.sizeDelta = Vector2.zero;
+    }
+
+    private void RestoreAimLineParent()
+    {
+        Transform targetParent = originalAimLineParent != null
+            ? originalAimLineParent
+            : circle;
+
+        if (line.parent != targetParent)
+        {
+            line.SetParent(targetParent, false);
+            line.SetSiblingIndex(originalAimLineSiblingIndex);
+        }
+    }
+
+    private void CacheAimGuideBlockBaseRotation()
+    {
+        if (aimGuideBlock == null || hasAimGuideBlockBaseRotation)
+        {
+            return;
+        }
+
+        aimGuideBlockBaseLocalRotation = aimGuideBlock.localRotation;
+        hasAimGuideBlockBaseRotation = true;
     }
 
     private static Sprite CreateWhiteSprite()
