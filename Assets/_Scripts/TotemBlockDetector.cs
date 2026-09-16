@@ -44,6 +44,14 @@ public class TotemBlockDetector : MonoBehaviour
         cachedRigidbody = GetComponent<Rigidbody>();
     }
 
+    public void ConfigureBalanceStateThresholds(
+        float linearVelocityThreshold,
+        float angularVelocityThreshold)
+    {
+        balanceStateLinearVelocityThreshold = Mathf.Max(0f, linearVelocityThreshold);
+        balanceStateAngularVelocityThreshold = Mathf.Max(0f, angularVelocityThreshold);
+    }
+
     private void FixedUpdate()
     {
         UpdateBalanceState();

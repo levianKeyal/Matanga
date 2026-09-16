@@ -91,6 +91,10 @@ public class CoreManager : MonoBehaviour
         BlockBalanceEvaluationMode.LegacyIsBalanced;
     [SerializeField] private bool logBalanceEvaluationDifferences;
 
+    [Header("Balance State Thresholds")]
+    [SerializeField, Min(0f)] private float balanceStateLinearVelocityThreshold = 0.08f;
+    [SerializeField, Min(0f)] private float balanceStateAngularVelocityThreshold = 0.10f;
+
     private bool isAiming;
     private float currentLineLength;
     private float currentAimAngle;
@@ -658,6 +662,10 @@ public class CoreManager : MonoBehaviour
             currentBlockDetector = blockToLaunch.gameObject.AddComponent<TotemBlockDetector>();
         }
 
+        currentBlockDetector.ConfigureBalanceStateThresholds(
+            balanceStateLinearVelocityThreshold,
+            balanceStateAngularVelocityThreshold);
+
         ResetCurrentBlockRuntimeState();
         ResetAimState();
         ResetLaunchState();
@@ -894,12 +902,22 @@ public class CoreManager : MonoBehaviour
                 return false;
             }
 
+            if (blockBalanceEvaluationMode == BlockBalanceEvaluationMode.BalanceState)
+            {
+                if (!IsBlockBalancedForCurrentEvaluationMode(detector))
+                {
+                    return false;
+                }
+
+                continue;
+            }
+
             if (!IsBlockCompletelyStill(detector))
             {
                 return false;
             }
 
-            if (detector.IsBalanced)
+            if (IsBlockBalancedForCurrentEvaluationMode(detector))
             {
                 continue;
             }
@@ -947,6 +965,16 @@ public class CoreManager : MonoBehaviour
         if (logBalanceEvaluationDifferences)
         {
             LogBalanceEvaluationDifference(detector);
+        }
+
+        return IsBlockBalancedForCurrentEvaluationMode(detector);
+    }
+
+    private bool IsBlockBalancedForCurrentEvaluationMode(TotemBlockDetector detector)
+    {
+        if (detector == null)
+        {
+            return false;
         }
 
         switch (blockBalanceEvaluationMode)

@@ -2314,6 +2314,8 @@ MonoBehaviour:
   towerSnapshotValidator: {fileID: 0}
   blockBalanceEvaluationMode: 1
   logBalanceEvaluationDifferences: 1
+  balanceStateLinearVelocityThreshold: 0.5
+  balanceStateAngularVelocityThreshold: 1
 --- !u!4 &1483525529
 Transform:
   m_ObjectHideFlags: 0
