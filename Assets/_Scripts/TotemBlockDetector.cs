@@ -54,6 +54,88 @@ public class TotemBlockDetector : MonoBehaviour
         balanceStateAngularVelocityThreshold = Mathf.Max(0f, angularVelocityThreshold);
     }
 
+    public bool HasSupportTransform(Transform target)
+    {
+        if (target == null)
+        {
+            return false;
+        }
+
+        foreach (Collider supportCollider in supportColliders)
+        {
+            if (supportCollider == null)
+            {
+                continue;
+            }
+
+            Transform supportTransform = supportCollider.transform;
+            if (supportTransform == target ||
+                supportTransform.IsChildOf(target) ||
+                target.IsChildOf(supportTransform))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    public bool GetSupportedByBlockDetectors(List<TotemBlockDetector> results)
+    {
+        if (results == null)
+        {
+            return false;
+        }
+
+        results.Clear();
+        bool foundAny = false;
+
+        foreach (Collider supportCollider in supportColliders)
+        {
+            if (supportCollider == null)
+            {
+                continue;
+            }
+
+            TotemBlockDetector detector = supportCollider.GetComponentInParent<TotemBlockDetector>();
+            if (detector == null || detector == this || results.Contains(detector))
+            {
+                continue;
+            }
+
+            results.Add(detector);
+            foundAny = true;
+        }
+
+        return foundAny;
+    }
+
+    public bool HasSupportDetector(TotemBlockDetector targetDetector)
+    {
+        if (targetDetector == null)
+        {
+            return false;
+        }
+
+        foreach (Collider supportCollider in supportColliders)
+        {
+            if (supportCollider == null)
+            {
+                continue;
+            }
+
+            TotemBlockDetector supportDetector =
+                supportCollider.GetComponentInParent<TotemBlockDetector>();
+
+            if (supportDetector == targetDetector)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private void FixedUpdate()
     {
         UpdateBalanceState();
@@ -61,21 +143,21 @@ public class TotemBlockDetector : MonoBehaviour
 
     private void OnCollisionEnter(Collision collision)
     {
-        if (IsBlockBaseCollider(collision.collider))
+        if (IsBlockBaseCollision(collision))
         {
-            NotifyBlockBaseContact();
+            RequestBlockBaseCleanup();
         }
     }
 
     private void OnCollisionStay(Collision collision)
     {
-        if (IsBlockBaseCollider(collision.collider))
+        if (IsBlockBaseCollision(collision))
         {
-            NotifyBlockBaseContact();
+            RequestBlockBaseCleanup();
             return;
         }
 
-        if (!collision.collider.CompareTag(supportingBlockTag))
+        if (collision.collider == null || !collision.collider.CompareTag(supportingBlockTag))
         {
             return;
         }
@@ -114,7 +196,7 @@ public class TotemBlockDetector : MonoBehaviour
 
     private void OnCollisionExit(Collision collision)
     {
-        if (!collision.collider.CompareTag(supportingBlockTag))
+        if (collision.collider == null || !collision.collider.CompareTag(supportingBlockTag))
         {
             return;
         }
@@ -124,28 +206,33 @@ public class TotemBlockDetector : MonoBehaviour
         UpdateBalanceState();
     }
 
-    private void NotifyBlockBaseContact()
+    private void RequestBlockBaseCleanup()
     {
         if (hasRequestedBlockBaseCleanup)
         {
             return;
         }
 
-        hasRequestedBlockBaseCleanup = true;
-
         CoreManager coreManager = FindFirstObjectByType<CoreManager>();
         if (coreManager != null)
         {
-            coreManager.RemoveBlockAfterBlockBaseContact(this);
+            if (coreManager.RemoveBlockAfterBlockBaseContact(this))
+            {
+                hasRequestedBlockBaseCleanup = true;
+            }
+
             return;
         }
 
+        hasRequestedBlockBaseCleanup = true;
         Destroy(gameObject);
     }
 
-    private bool IsBlockBaseCollider(Collider other)
+    private bool IsBlockBaseCollision(Collision collision)
     {
-        return other != null && other.gameObject.tag == blockBaseTag;
+        return collision != null &&
+               collision.collider != null &&
+               collision.collider.gameObject.tag == blockBaseTag;
     }
 
     private void UpdateBalanceState()

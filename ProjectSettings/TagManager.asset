@@ -6,6 +6,7 @@ TagManager:
   tags:
   - TotemBlock
   - Ground
+  - BlockBase
   layers:
   - Default
   - TransparentFX

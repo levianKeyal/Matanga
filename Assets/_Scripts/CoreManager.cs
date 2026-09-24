@@ -17,6 +17,15 @@ public class CoreManager : MonoBehaviour
         ImmediateAfterLaunch
     }
 
+    private class LaunchedBlockFallData
+    {
+        public Rigidbody Rigidbody;
+        public float LaunchStartFixedTime;
+        public float LaunchApexTime;
+        public bool HasEnteredFallPhase;
+        public float FallPhaseTimer;
+    }
+
     private enum AimDirectionMode
     {
         RadialDrag,
@@ -107,6 +116,12 @@ public class CoreManager : MonoBehaviour
     [SerializeField, Min(0f)] private float immediateSpawnDelayAfterLaunch = 0.35f;
     [SerializeField, Min(1)] private int maxImmediatePendingLaunchedBlocks = 3;
 
+    [Header("Spawn Safety Cleanup")]
+    [SerializeField] private bool enableSpawnAreaCleanup = true;
+    [SerializeField] private Vector3 spawnBlockCleanupHalfExtents = new Vector3(0.45f, 0.45f, 0.45f);
+    [SerializeField] private LayerMask spawnCleanupLayers = ~0;
+    [SerializeField, Min(0f)] private float spawnAreaCleanupRetryDelay = 0.05f;
+
     private bool isAiming;
     private float currentLineLength;
     private float currentAimAngle;
@@ -117,18 +132,20 @@ public class CoreManager : MonoBehaviour
     private bool hasSpawnedNextBlock;
     private bool hasUsedAimForCurrentBlock;
     private bool hasLaunchedCurrentBlock;
-    private bool hasEnteredFallPhase;
-    private float fallPhaseTimer;
-    private float launchApexY;
-    private float launchApexTime;
-    private float launchStartFixedTime;
-    private bool hasLaunchApexData;
     private float unstackedBlockQuietTimer;
     private float respawnTimer;
     private bool hasPendingRespawn;
     private bool spawnBlockAfterBaseAnimation;
     private readonly List<TotemBlockDetector> immediatePendingLaunchedBlocks =
         new List<TotemBlockDetector>();
+    private readonly List<LaunchedBlockFallData> launchedBlockFallData =
+        new List<LaunchedBlockFallData>();
+    private readonly List<TotemBlockDetector> supportDetectorBuffer =
+        new List<TotemBlockDetector>();
+    private readonly Stack<TotemBlockDetector> supportDetectorStack =
+        new Stack<TotemBlockDetector>();
+    private readonly HashSet<TotemBlockDetector> visitedSupportDetectors =
+        new HashSet<TotemBlockDetector>();
     private const float CompletelyStillVelocitySqrThreshold = 0.0001f;
 
     private void Awake()
@@ -532,7 +549,7 @@ public class CoreManager : MonoBehaviour
 
     private void FixedUpdate()
     {
-        UpdateLaunchFallBehavior();
+        UpdateLaunchedBlocksFallBehavior();
     }
 
     private void OnValidate()
@@ -556,13 +573,11 @@ public class CoreManager : MonoBehaviour
         blockToLaunch.angularVelocity = Vector3.zero;
         blockToLaunch.isKinematic = false;
         FaceBlockTowardsBase();
-        CacheLaunchApexData(launchDirection, launchImpulse);
         blockToLaunch.AddForce(launchDirection * launchImpulse, ForceMode.Impulse);
+        RegisterLaunchedBlockFallData(blockToLaunch, launchDirection, launchImpulse);
         hasLaunchedCurrentBlock = true;
         AddCurrentBlockToImmediatePendingLaunchedBlocks();
         TryScheduleImmediateSpawnAfterLaunch();
-        hasEnteredFallPhase = false;
-        fallPhaseTimer = 0f;
         HideHorizontalAimGuideBlock();
         trajectoryPreview.HidePreview();
         hasAimAngle = false;
@@ -661,10 +676,17 @@ public class CoreManager : MonoBehaviour
         }
 
         CleanupInvalidStackedBlocks();
+        CleanupImmediatePendingLaunchedBlocks();
 
         if (towerStackController.PendingDestroyCount > 0)
         {
             StartPendingSpawn(spawnDelayAfterBlockBaseMove);
+            return;
+        }
+
+        if (CleanupBlocksOccupyingSpawnArea())
+        {
+            StartPendingSpawn(spawnAreaCleanupRetryDelay);
             return;
         }
 
@@ -715,6 +737,13 @@ public class CoreManager : MonoBehaviour
         }
 
         if (currentBlockDetector == null)
+        {
+            balancedTimer = 0f;
+            hasSpawnedNextBlock = false;
+            return;
+        }
+
+        if (TryCleanupInvalidBlockBaseSupportedBlock(currentBlockDetector))
         {
             balancedTimer = 0f;
             hasSpawnedNextBlock = false;
@@ -902,6 +931,11 @@ public class CoreManager : MonoBehaviour
                 continue;
             }
 
+            if (TryCleanupInvalidBlockBaseSupportedBlock(detector))
+            {
+                continue;
+            }
+
             if (!IsBlockReadyToStack(detector))
             {
                 continue;
@@ -964,6 +998,57 @@ public class CoreManager : MonoBehaviour
         CleanupImmediatePendingLaunchedBlocks();
 
         return immediatePendingLaunchedBlocks.Count < Mathf.Max(1, maxImmediatePendingLaunchedBlocks);
+    }
+
+    private bool CleanupBlocksOccupyingSpawnArea()
+    {
+        if (!enableSpawnAreaCleanup)
+        {
+            return false;
+        }
+
+        Collider[] hits = Physics.OverlapBox(
+            GetBlockSpawnPosition(),
+            spawnBlockCleanupHalfExtents,
+            GetBlockSpawnRotation(),
+            spawnCleanupLayers,
+            QueryTriggerInteraction.Ignore);
+
+        bool cleanedAny = false;
+        List<TotemBlockDetector> cleanedDetectors = new List<TotemBlockDetector>();
+
+        for (int i = 0; i < hits.Length; i++)
+        {
+            Collider hit = hits[i];
+            if (hit == null)
+            {
+                continue;
+            }
+
+            TotemBlockDetector detector = hit.GetComponentInParent<TotemBlockDetector>();
+            if (detector == null || cleanedDetectors.Contains(detector))
+            {
+                continue;
+            }
+
+            cleanedDetectors.Add(detector);
+            if (RemoveBlockAfterBlockBaseContact(detector))
+            {
+                cleanedAny = true;
+            }
+        }
+
+        return cleanedAny;
+    }
+
+    private Vector3 GetBlockSpawnPosition()
+    {
+        return blockSpawnPoint != null ? blockSpawnPoint.position : Vector3.zero;
+    }
+
+    private Quaternion GetBlockSpawnRotation()
+    {
+        return blockSpawnPoint != null ? blockSpawnPoint.rotation : Quaternion.identity;
     }
 
     // Queue or remove fallen blocks while preserving the one-at-a-time cleanup flow.
@@ -1106,7 +1191,12 @@ public class CoreManager : MonoBehaviour
             LogBalanceEvaluationDifference(detector);
         }
 
-        return IsBlockBalancedForCurrentEvaluationMode(detector);
+        if (!IsBlockBalancedForCurrentEvaluationMode(detector))
+        {
+            return false;
+        }
+
+        return IsBlockPartOfValidTotemTower(detector);
     }
 
     private bool IsBlockBalancedForCurrentEvaluationMode(TotemBlockDetector detector)
@@ -1125,6 +1215,170 @@ public class CoreManager : MonoBehaviour
             default:
                 return detector.IsBalanced;
         }
+    }
+
+    private bool IsBlockPartOfValidTotemTower(TotemBlockDetector detector)
+    {
+        if (detector == null)
+        {
+            return false;
+        }
+
+        if (totemBase == null)
+        {
+            return true;
+        }
+
+        return IsBlockConnectedToTransform(detector, totemBase, true);
+    }
+
+    private bool IsBlockConnectedToBlockBase(TotemBlockDetector detector)
+    {
+        if (detector == null || blockBase == null)
+        {
+            return false;
+        }
+
+        return IsBlockConnectedToTransform(detector, blockBase, false);
+    }
+
+    private bool IsBlockConnectedToTransform(
+        TotemBlockDetector startDetector,
+        Transform target,
+        bool allowKnownStackedSupport)
+    {
+        if (startDetector == null || target == null)
+        {
+            return false;
+        }
+
+        supportDetectorStack.Clear();
+        visitedSupportDetectors.Clear();
+        supportDetectorStack.Push(startDetector);
+
+        while (supportDetectorStack.Count > 0)
+        {
+            TotemBlockDetector detector = supportDetectorStack.Pop();
+
+            if (detector == null || !visitedSupportDetectors.Add(detector))
+            {
+                continue;
+            }
+
+            if (detector.HasSupportTransform(target))
+            {
+                return true;
+            }
+
+            supportDetectorBuffer.Clear();
+            detector.GetSupportedByBlockDetectors(supportDetectorBuffer);
+
+            for (int i = 0; i < supportDetectorBuffer.Count; i++)
+            {
+                TotemBlockDetector supportDetector = supportDetectorBuffer[i];
+
+                if (supportDetector == null)
+                {
+                    continue;
+                }
+
+                if (allowKnownStackedSupport &&
+                    towerStackController != null &&
+                    towerStackController.Contains(supportDetector))
+                {
+                    return true;
+                }
+
+                supportDetectorStack.Push(supportDetector);
+            }
+        }
+
+        return false;
+    }
+
+    private bool TryCleanupInvalidBlockBaseSupportedBlock(TotemBlockDetector detector)
+    {
+        if (detector == null || IsCurrentReadyBlock(detector))
+        {
+            return false;
+        }
+
+        if (IsBlockPartOfValidTotemTower(detector))
+        {
+            return false;
+        }
+
+        if (IsBlockSupportedByCurrentReadyBlock(detector))
+        {
+            return RemoveBlockAfterBlockBaseContact(detector);
+        }
+
+        if (!IsBlockConnectedToBlockBase(detector))
+        {
+            return false;
+        }
+
+        return RemoveBlockAfterBlockBaseContact(detector);
+    }
+
+    private bool IsBlockSupportedByCurrentReadyBlock(TotemBlockDetector detector)
+    {
+        if (detector == null || IsCurrentReadyBlock(detector))
+        {
+            return false;
+        }
+
+        if (currentBlockDetector == null || blockToLaunch == null || hasLaunchedCurrentBlock)
+        {
+            return false;
+        }
+
+        return detector.HasSupportDetector(currentBlockDetector) ||
+               IsBlockPhysicallyTouchingCurrentReadyBlock(detector);
+    }
+
+    private bool IsBlockPhysicallyTouchingCurrentReadyBlock(TotemBlockDetector detector)
+    {
+        if (detector == null || currentBlockDetector == null || IsCurrentReadyBlock(detector))
+        {
+            return false;
+        }
+
+        Collider[] detectorColliders = detector.GetComponentsInChildren<Collider>();
+        Collider[] readyColliders = currentBlockDetector.GetComponentsInChildren<Collider>();
+
+        for (int i = 0; i < detectorColliders.Length; i++)
+        {
+            Collider detectorCollider = detectorColliders[i];
+            if (detectorCollider == null)
+            {
+                continue;
+            }
+
+            for (int j = 0; j < readyColliders.Length; j++)
+            {
+                Collider readyCollider = readyColliders[j];
+                if (readyCollider == null)
+                {
+                    continue;
+                }
+
+                if (Physics.ComputePenetration(
+                        detectorCollider,
+                        detectorCollider.transform.position,
+                        detectorCollider.transform.rotation,
+                        readyCollider,
+                        readyCollider.transform.position,
+                        readyCollider.transform.rotation,
+                        out _,
+                        out _))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     private void LogBalanceEvaluationDifference(TotemBlockDetector detector)
@@ -1170,12 +1424,6 @@ public class CoreManager : MonoBehaviour
     private void ResetLaunchState()
     {
         hasLaunchedCurrentBlock = false;
-        hasEnteredFallPhase = false;
-        fallPhaseTimer = 0f;
-        hasLaunchApexData = false;
-        launchApexY = 0f;
-        launchApexTime = 0f;
-        launchStartFixedTime = 0f;
         unstackedBlockQuietTimer = 0f;
     }
 
@@ -1235,11 +1483,16 @@ public class CoreManager : MonoBehaviour
         RemoveBlockFromAllRuntimeTracking(blockDetector, true);
     }
 
-    public void RemoveBlockAfterBlockBaseContact(TotemBlockDetector blockDetector)
+    public bool RemoveBlockAfterBlockBaseContact(TotemBlockDetector blockDetector)
     {
         if (blockDetector == null)
         {
-            return;
+            return false;
+        }
+
+        if (IsCurrentReadyBlock(blockDetector))
+        {
+            return false;
         }
 
         RemoveBlockFromAllRuntimeTracking(blockDetector, true);
@@ -1248,6 +1501,8 @@ public class CoreManager : MonoBehaviour
         {
             Destroy(blockDetector.gameObject);
         }
+
+        return true;
     }
 
     private void RemoveBlockFromAllRuntimeTracking(
@@ -1260,6 +1515,11 @@ public class CoreManager : MonoBehaviour
         }
 
         immediatePendingLaunchedBlocks.Remove(blockDetector);
+
+        if (blockDetector.TryGetComponent<Rigidbody>(out Rigidbody trackedRigidbody))
+        {
+            RemoveLaunchedBlockFallData(trackedRigidbody);
+        }
 
         bool removedFromStack = towerStackController.RemoveBlock(blockDetector);
         towerStackController.RemovePendingDestroy(blockDetector);
@@ -1283,6 +1543,23 @@ public class CoreManager : MonoBehaviour
     private bool IsCurrentControlledBlock(TotemBlockDetector blockDetector)
     {
         if (blockDetector == null)
+        {
+            return false;
+        }
+
+        if (currentBlockDetector == blockDetector)
+        {
+            return true;
+        }
+
+        return blockToLaunch != null &&
+               blockDetector.TryGetComponent<Rigidbody>(out Rigidbody detectorRigidbody) &&
+               blockToLaunch == detectorRigidbody;
+    }
+
+    private bool IsCurrentReadyBlock(TotemBlockDetector blockDetector)
+    {
+        if (blockDetector == null || hasLaunchedCurrentBlock)
         {
             return false;
         }
@@ -1386,89 +1663,105 @@ public class CoreManager : MonoBehaviour
         blockToLaunch.linearVelocity = Vector3.zero;
         blockToLaunch.angularVelocity = Vector3.zero;
         blockToLaunch.Sleep();
-        hasEnteredFallPhase = false;
-        fallPhaseTimer = 0f;
-        hasLaunchApexData = false;
+        RemoveLaunchedBlockFallData(blockToLaunch);
     }
 
     // Add extra gravity only after the predicted apex of the launch trajectory.
-    private void UpdateLaunchFallBehavior()
+    private void UpdateLaunchedBlocksFallBehavior()
     {
-        if (!hasLaunchedCurrentBlock || blockToLaunch == null || !hasLaunchApexData)
+        for (int i = launchedBlockFallData.Count - 1; i >= 0; i--)
         {
-            hasEnteredFallPhase = false;
-            fallPhaseTimer = 0f;
-            return;
+            LaunchedBlockFallData data = launchedBlockFallData[i];
+
+            if (data == null || data.Rigidbody == null)
+            {
+                launchedBlockFallData.RemoveAt(i);
+                continue;
+            }
+
+            Rigidbody launchedRigidbody = data.Rigidbody;
+            if (launchedRigidbody.isKinematic)
+            {
+                launchedBlockFallData.RemoveAt(i);
+                continue;
+            }
+
+            float elapsedSinceLaunch = Time.fixedTime - data.LaunchStartFixedTime;
+
+            if (!data.HasEnteredFallPhase &&
+                elapsedSinceLaunch >= data.LaunchApexTime)
+            {
+                data.HasEnteredFallPhase = true;
+                data.FallPhaseTimer = 0f;
+            }
+
+            if (!data.HasEnteredFallPhase)
+            {
+                continue;
+            }
+
+            data.FallPhaseTimer += Time.fixedDeltaTime;
+
+            float blendT = apexFallBlendTime <= 0f
+                ? 1f
+                : Mathf.Clamp01(data.FallPhaseTimer / apexFallBlendTime);
+
+            float gravityMultiplier = Mathf.Lerp(1f, apexFallGravityMultiplier, blendT);
+            Vector3 extraGravity = Physics.gravity * (gravityMultiplier - 1f);
+            launchedRigidbody.AddForce(extraGravity, ForceMode.Acceleration);
         }
-
-        if (hasPendingRespawn)
-        {
-            return;
-        }
-
-        if (blockToLaunch.isKinematic)
-        {
-            hasEnteredFallPhase = false;
-            fallPhaseTimer = 0f;
-            return;
-        }
-
-        float elapsedSinceLaunch = Time.fixedTime - launchStartFixedTime;
-
-        if (!hasEnteredFallPhase &&
-            elapsedSinceLaunch >= launchApexTime)
-        {
-            hasEnteredFallPhase = true;
-            fallPhaseTimer = 0f;
-        }
-
-        if (!hasEnteredFallPhase)
-        {
-            return;
-        }
-
-        fallPhaseTimer += Time.fixedDeltaTime;
-
-        float blendT = apexFallBlendTime <= 0f
-            ? 1f
-            : Mathf.Clamp01(fallPhaseTimer / apexFallBlendTime);
-
-        float gravityMultiplier = Mathf.Lerp(1f, apexFallGravityMultiplier, blendT);
-        Vector3 extraGravity = Physics.gravity * (gravityMultiplier - 1f);
-        blockToLaunch.AddForce(extraGravity, ForceMode.Acceleration);
     }
 
-    private void CacheLaunchApexData(Vector3 launchDirection, float launchImpulse)
+    private void RegisterLaunchedBlockFallData(
+        Rigidbody launchedRigidbody,
+        Vector3 launchDirection,
+        float launchImpulse)
     {
-        if (blockToLaunch == null)
+        if (launchedRigidbody == null)
         {
-            hasLaunchApexData = false;
-            launchApexY = 0f;
-            launchApexTime = 0f;
-            launchStartFixedTime = 0f;
             return;
         }
 
-        float mass = Mathf.Max(0.0001f, blockToLaunch.mass);
+        RemoveLaunchedBlockFallData(launchedRigidbody);
+
+        float mass = Mathf.Max(0.0001f, launchedRigidbody.mass);
         Vector3 initialVelocity = launchDirection * (launchImpulse / mass);
         float gravityY = Physics.gravity.y;
-
-        launchStartFixedTime = Time.fixedTime;
+        float apexTime = 0f;
 
         if (gravityY < -0.0001f && initialVelocity.y > 0f)
         {
-            launchApexTime = initialVelocity.y / -gravityY;
-            launchApexY = blockToLaunch.position.y +
-                          (initialVelocity.y * launchApexTime) +
-                          (0.5f * gravityY * launchApexTime * launchApexTime);
-        }
-        else
-        {
-            launchApexTime = 0f;
-            launchApexY = blockToLaunch.position.y;
+            apexTime = initialVelocity.y / -gravityY;
         }
 
-        hasLaunchApexData = true;
+        launchedBlockFallData.Add(new LaunchedBlockFallData
+        {
+            Rigidbody = launchedRigidbody,
+            LaunchStartFixedTime = Time.fixedTime,
+            LaunchApexTime = apexTime,
+            HasEnteredFallPhase = false,
+            FallPhaseTimer = 0f
+        });
+    }
+
+    private void RemoveLaunchedBlockFallData(Rigidbody rigidbody)
+    {
+        if (rigidbody == null)
+        {
+            return;
+        }
+
+        for (int i = launchedBlockFallData.Count - 1; i >= 0; i--)
+        {
+            LaunchedBlockFallData data = launchedBlockFallData[i];
+
+            if (data == null ||
+                data.Rigidbody == null ||
+                data.Rigidbody == rigidbody)
+            {
+                launchedBlockFallData.RemoveAt(i);
+            }
+        }
     }
 
     private void FaceBlockTowardsBase()

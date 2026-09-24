@@ -82,7 +82,7 @@ public class TrajectoryPreview : MonoBehaviour
 
         int segmentCount = Mathf.Max(2, trajectorySegmentCount);
         float step = Mathf.Max(0.01f, trajectoryTimeStep);
-        float physicsStep = Mathf.Max(Time.fixedDeltaTime, 0.0001f);
+        float physicsStep = Mathf.Max(0.0001f, Mathf.Min(Time.fixedDeltaTime, 0.01f));
         float minimumSimulationTime = step * (segmentCount - 1);
         float totalSimulationTime = Mathf.Max(minimumSimulationTime, predictedApexTime * 2.25f);
         segmentCount = Mathf.Max(segmentCount, Mathf.CeilToInt(totalSimulationTime / step) + 1);
